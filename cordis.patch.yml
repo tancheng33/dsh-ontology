@@ -1,0 +1,51 @@
+# The configuration layer this bundle contributes when a profile lists it.
+# Users override any key here from their own profile `cordis.patch.yml`.
+
+# The ontology is durable, so it needs the storage stack. `dsh-base` does not
+# ship one — `dsh-web-app` is what normally inserts these three rows — so this
+# bundle inserts them itself, under the SAME ids that bundle uses. Later layers
+# win per id, so a profile that already has the stack simply ends up with these
+# equivalent values instead of a second, competing backend. Change the medium
+# by overriding `storage-json` (or replacing it with `dsh-storage-sqlite`) in
+# your own profile patch.
+- insert:
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+
+    - id: ontology
+      name: dsh-ontology
+      config:
+        # Which storage domain name the ontology persists under. One name is
+        # one graph; insert the row twice with different names for two
+        # isolated graphs.
+        domain: ontology
+        # Reject assertions that violate the declared vocabulary. `false`
+        # records the violation on the stored fact instead of refusing it,
+        # which suits exploratory modelling.
+        strict: true
+        # Materialize inverse / symmetric / transitive entailments on query.
+        inference: true
+        # Contribute a vocabulary summary to the system prompt so the model
+        # knows the graph exists and what terms it already has.
+        promptSection: true
+        # Upper bound on classes + relations listed in that summary.
+        promptMaxTerms: 60
+        # Where the section lands in the assembled prompt (tool guidance is
+        # conventionally 100–199).
+        promptOrder: 150
+        # Default and maximum result size for one query.
+        defaultLimit: 50
+        maxLimit: 500
+        # Capacity guards; an assertion past the bound fails loudly.
+        maxEntities: 20000
+        maxFacts: 100000
