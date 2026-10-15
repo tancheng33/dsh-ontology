@@ -29,3 +29,29 @@ jobs:
       - run: pnpm test
 
       - run: pnpm build
+
+  # Boot smoke: install the packed tarball into a real dsh profile that also
+  # carries dsh-base, boot the headless app twice against a scripted local LLM,
+  # and check mount, tools, prompt section, inference, and persistence. This is
+  # the layer unit tests cannot reach (cordis.patch.yml composition, the
+  # storage stack, the tool pipeline); issue #1 lived there.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh:
+          - 0.1.5-rc.2   # oldest supported line (peer range floor)
+          - next         # what a fresh install gets today
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm smoke
+        env:
+          DSH_VERSION: ${{ matrix.dsh }}

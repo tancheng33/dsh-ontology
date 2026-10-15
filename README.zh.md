@@ -59,6 +59,7 @@ dsh plugin --profile <名字> add github:tancheng33/dsh-ontology
 | `domain` | `ontology` | 存储域名；一个名字 = 一张独立图谱。须匹配 `/^[a-z][a-z0-9_]*$/`。 |
 | `strict` | `true` | 拒绝违反词汇约束的事实。设为 `false` 则照样存下，但把违规记录在事实上，适合探索式建模。 |
 | `inference` | `true` | 允许查询返回推导出的事实。 |
+| `maxInferred` | `20000` | 单次读取的推导事实上限。超出后结果带 `inferenceTruncated: true`，渲染文本也会说明；传递闭包很大的图谱可以调高。 |
 | `promptSection` | `true` | 把词汇摘要注入系统提示词。 |
 | `promptMaxTerms` | `60` | 摘要中词条数量上限。 |
 | `promptOrder` | `150` | 该段落在系统提示词中的位置。 |
@@ -71,9 +72,9 @@ dsh plugin --profile <名字> add github:tancheng33/dsh-ontology
 - insert:
     - id: ontology-team
       name: dsh-ontology
-      config: { domain: team_ontology, strict: true, inference: true, promptSection: true,
-                promptMaxTerms: 60, promptOrder: 150, defaultLimit: 50, maxLimit: 500,
-                maxEntities: 20000, maxFacts: 100000 }
+      config: { domain: team_ontology, strict: true, inference: true, maxInferred: 20000,
+                promptSection: true, promptMaxTerms: 60, promptOrder: 150,
+                defaultLimit: 50, maxLimit: 500, maxEntities: 20000, maxFacts: 100000 }
 ```
 
 （patch 会整体替换一行的 `config`，所以每个键都要写全。）
@@ -188,16 +189,37 @@ const upstream = facts.filter(fact => fact.via === 'transitive').map(fact => fac
 import { entail, findPath, validateFactInput } from 'dsh-ontology/ontology'
 ```
 
+## 规模
+
+读取按写入代次建索引并记忆化：一次写入后的第一次查询推导一遍闭包（基于邻接索引的工作表定点算法，不是平方级扫描），到下一次写入之前的所有查询都复用它。写入维护一份按主语的索引，`functional` 检查只花主语的度数，不扫全表。在 2.1 万实体 / 10.1 万事实的合成依赖图上（`pnpm bench 20000 3`，Apple Silicon）：
+
+| 操作 | 0.2 之前 | 0.2 |
+|---|---|---|
+| 以 500 条一批断言 10.1 万条事实 | 340 s | 0.5 s |
+| 写入后第一次带推理的查询 | 1 万条事实时已 > 6 s | 0.1 s |
+| 之后的带推理查询 | 每次 > 6 s | < 1 ms |
+| 深度 8 的最短路径（含推理） | > 6 s | 16 ms |
+
+推导到 `maxInferred` 条就停，并明确告知，而不是悄悄返回闭包的一个前缀。
+
+存储介质默认是 `dsh-storage-json`（一个 domain 一份 JSON 文档，每次写入原子重写）。几万条事实以上的图谱，建议在 profile patch 里把 `storage-json` 行换成 `dsh-storage-sqlite`；插件不关心是哪个后端在服务它的 domain。
+
+系统提示词段落由 harness 每轮组装一次，所以本轮内定义的词汇要到下一轮才出现在常驻上下文里。
+
 ## 开发
 
 ```sh
 pnpm install
-pnpm test        # 47 个单测：规则、工具、提示词段落
+pnpm test        # 49 个单测：规则、工具、提示词段落
 pnpm typecheck
 pnpm build
+pnpm smoke       # 在真实 dsh profile 里做启动冒烟（见下）
+pnpm bench 2000 3
 ```
 
 `tests/memory-domain.ts` 是一个内存版的存储域替身，因此 store 和工具是端到端测的——真校验、真推理、真工具返回值——不需要任何后端。
+
+`pnpm smoke` 补的是单测够不到的那一层。它把打包好的 tgz 装进一个由官方 `headless` 模板新建的 profile（因此带 `dsh-base`），对着一个本地脚本化的假 LLM 启动（两种协议格式都会说），依次驱动 `ontology_define` → `ontology_assert` → `ontology_query`（含推理），然后在同一个 `$DSH_HOME` 上再启动一次，检查数据持久化、提示词段落已带上词汇。除 npm registry 外不需要网络，也不需要 API key。`DSH_VERSION` 选 harness 版本（CI 跑最老支持线和 `next`）；`DSH_BIN` 复用已安装的；`SMOKE_PLUGIN_SPEC=dsh-ontology@0.1.0` 可以演示该测试确实能抓到那个版本的 storage 重复行启动崩溃。
 
 ## 环境要求
 

@@ -108,13 +108,38 @@ export interface DerivedFact extends Fact {
 }
 
 /**
+ * The read surface one graph table exposes. A `Map` satisfies it, and so does
+ * a thin adapter over a live storage table, which is how the store avoids
+ * copying every record on each read generation.
+ */
+export interface GraphTable<V> {
+  readonly size: number
+  get(key: string): V | undefined
+  has(key: string): boolean
+  keys(): Iterable<string>
+  values(): Iterable<V>
+  entries(): Iterable<[string, V]>
+}
+
+/**
  * A read-only view of the whole graph. The pure logic operates only on this,
  * so every rule is testable without a storage backend or a Cordis context.
+ *
+ * Identity matters: derived structures (entailment, fact indexes) are
+ * memoized per view object, so a producer hands out one view per write
+ * generation and a fresh one after every write.
  */
 export interface GraphView {
-  readonly terms: ReadonlyMap<string, Term>
-  readonly entities: ReadonlyMap<string, Entity>
-  readonly facts: ReadonlyMap<string, Fact>
+  readonly terms: GraphTable<Term>
+  readonly entities: GraphTable<Entity>
+  readonly facts: GraphTable<Fact>
+  /**
+   * Optional accelerator: the asserted facts whose subject is `subject`. A
+   * producer that maintains a secondary index across writes supplies it so
+   * per-write validation (the `functional` check) does not rescan the fact
+   * table; without it consumers fall back to indexing the view.
+   */
+  readonly factsBySubject?: (subject: string) => Iterable<Fact>
 }
 
 /** One reason an input was rejected, phrased for the model that must fix it. */

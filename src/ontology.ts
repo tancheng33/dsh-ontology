@@ -17,6 +17,7 @@ import type {
   DerivedFact,
   Entity,
   Fact,
+  GraphTable,
   GraphView,
   RangeKind,
   RelationCharacteristic,
@@ -27,8 +28,11 @@ import type {
 
 export * from './types.ts'
 
-/** Bound on entailment fixpoint rounds; a cyclic graph would otherwise iterate forever. */
-const MAX_ENTAILMENT_ROUNDS = 32
+/**
+ * Default bound on derived facts per graph. Reaching it stops derivation and
+ * marks the result truncated rather than silently returning a partial closure.
+ */
+export const DEFAULT_ENTAILMENT_LIMIT = 20000
 
 // ---------------------------------------------------------------------------
 // Identifiers and keys
@@ -110,7 +114,7 @@ export function relationOf(graph: GraphView, id: string): RelationTerm | undefin
  * @param classId - Starting class.
  * @returns the class itself plus every ancestor reachable from it.
  */
-export function classAncestors(terms: ReadonlyMap<string, Term>, classId: string): Set<string> {
+export function classAncestors(terms: GraphTable<Term>, classId: string): Set<string> {
   const seen = new Set<string>()
   const queue = [classId]
   while (queue.length > 0) {
@@ -130,7 +134,7 @@ export function classAncestors(terms: ReadonlyMap<string, Term>, classId: string
  * @param classId - The subsuming class.
  * @returns the class itself plus every descendant.
  */
-export function classDescendants(terms: ReadonlyMap<string, Term>, classId: string): Set<string> {
+export function classDescendants(terms: GraphTable<Term>, classId: string): Set<string> {
   const result = new Set<string>([classId])
   // Fixpoint over the direct-parent edges: a class joins once any parent is in.
   let grew = true
@@ -157,12 +161,36 @@ export function classDescendants(terms: ReadonlyMap<string, Term>, classId: stri
 export function entityClasses(graph: GraphView, entityId: string): Set<string> {
   const entity = graph.entities.get(entityId)
   if (entity === undefined) return new Set()
+  return classesOf(graph, entity)
+}
+
+/**
+ * Effective classes of an entity record, with the per-class ancestor walk
+ * memoized per graph view so a scan over every entity costs one walk per
+ * distinct class rather than one per entity.
+ * @param graph - The graph to read.
+ * @param entity - The entity record.
+ * @returns every class the entity belongs to, directly or by subsumption.
+ */
+function classesOf(graph: GraphView, entity: Entity): Set<string> {
+  let ancestors = ancestorCache.get(graph)
+  if (ancestors === undefined) {
+    ancestors = new Map()
+    ancestorCache.set(graph, ancestors)
+  }
   const result = new Set<string>()
   for (const direct of entity.classes) {
-    for (const ancestor of classAncestors(graph.terms, direct)) result.add(ancestor)
+    let walked = ancestors.get(direct)
+    if (walked === undefined) {
+      walked = classAncestors(graph.terms, direct)
+      ancestors.set(direct, walked)
+    }
+    for (const ancestor of walked) result.add(ancestor)
   }
   return result
 }
+
+const ancestorCache = new WeakMap<GraphView, Map<string, Set<string>>>()
 
 // ---------------------------------------------------------------------------
 // TBox validation
@@ -439,8 +467,9 @@ export function validateFactInput(graph: GraphView, input: FactInput): Violation
   }
 
   if (relation.characteristics.includes('functional')) {
-    for (const fact of graph.facts.values()) {
-      if (fact.subject === input.subject && fact.predicate === relation.id && fact.object !== input.object) {
+    const candidates = graph.factsBySubject?.(input.subject) ?? factIndex(graph, false).bySubject.get(input.subject) ?? []
+    for (const fact of candidates) {
+      if (fact.predicate === relation.id && fact.object !== input.object) {
         violations.push({
           code: 'functional-conflict',
           message: `${relation.id} is functional and ${input.subject} already has `
@@ -466,56 +495,136 @@ function describeClasses(classes: ReadonlySet<string>): string {
 // Entailment
 // ---------------------------------------------------------------------------
 
+/** The derived facts of one graph, and whether the derivation ran to its fixpoint. */
+export interface Entailment {
+  readonly facts: readonly DerivedFact[]
+  /**
+   * `true` when the limit stopped derivation early. The facts are then a
+   * prefix of the closure, not the closure, and any consumer that reports
+   * inferred results should say so.
+   */
+  readonly truncated: boolean
+}
+
+const entailmentCache = new WeakMap<GraphView, Map<number, Entailment>>()
+
 /**
  * Derive the facts that follow from the asserted ones under the relations'
  * declared characteristics.
  *
- * Runs to a fixpoint (bounded by {@link MAX_ENTAILMENT_ROUNDS}) so rules
- * compose: an inverse of a transitive relation is itself closed transitively.
+ * A worklist (semi-naive) fixpoint: every fact, asserted or derived, is
+ * processed exactly once, and a transitive step joins it against an adjacency
+ * index of everything known so far in both directions, so the cost is
+ * proportional to the closure and the degrees involved rather than to the
+ * square of the fact count per round. Rules compose: an inverse of a
+ * transitive relation is itself closed transitively.
+ *
  * Derived facts are never persisted — retracting a premise removes everything
- * that rested on it, which is the whole point of deriving on read.
+ * that rested on it. The result is memoized per graph view and limit, so one
+ * write generation pays for derivation once however many queries read it.
+ * @param graph - The graph to reason over.
+ * @param limit - Maximum number of derived facts; reaching it stops derivation.
+ * @returns the entailed facts, tagged with the rule that produced each, and the truncation flag.
+ */
+export function entailment(graph: GraphView, limit = DEFAULT_ENTAILMENT_LIMIT): Entailment {
+  let perLimit = entailmentCache.get(graph)
+  if (perLimit === undefined) {
+    perLimit = new Map()
+    entailmentCache.set(graph, perLimit)
+  }
+  const cached = perLimit.get(limit)
+  if (cached !== undefined) return cached
+  const result = computeEntailment(graph, limit)
+  perLimit.set(limit, result)
+  return result
+}
+
+/**
+ * Derive the facts that follow from the asserted ones. See {@link entailment},
+ * which this wraps for callers that only need the facts.
  * @param graph - The graph to reason over.
  * @param limit - Maximum number of derived facts; reaching it stops derivation.
  * @returns the entailed facts, each tagged with the rule that produced it.
  */
-export function entail(graph: GraphView, limit = 20000): DerivedFact[] {
-  const derived = new Map<string, DerivedFact>()
-  /** Keys already present as asserted facts, which never get re-derived. */
-  const asserted = new Set(graph.facts.keys())
+export function entail(graph: GraphView, limit = DEFAULT_ENTAILMENT_LIMIT): DerivedFact[] {
+  return [...entailment(graph, limit).facts]
+}
 
-  const add = (fact: Fact, via: DerivedFact['via']): boolean => {
-    const key = factKey(fact.subject, fact.predicate, fact.object)
-    if (asserted.has(key) || derived.has(key)) return false
-    if (derived.size >= limit) return false
-    derived.set(key, { ...fact, via })
-    return true
+/**
+ * The uncached worklist fixpoint behind {@link entailment}.
+ * @param graph - The graph to reason over.
+ * @param limit - Maximum number of derived facts.
+ * @returns the entailment.
+ */
+function computeEntailment(graph: GraphView, limit: number): Entailment {
+  /** Keys of every fact known so far, asserted or derived. */
+  const known = new Set<string>(graph.facts.keys())
+  const derived: DerivedFact[] = []
+  /** predicate -> subject -> objects, over entity-valued facts known so far. */
+  const outgoing = new Map<string, Map<string, string[]>>()
+  /** predicate -> object -> subjects, over entity-valued facts known so far. */
+  const incoming = new Map<string, Map<string, string[]>>()
+  const queue: Fact[] = []
+  let truncated = false
+
+  const link = (table: Map<string, Map<string, string[]>>, predicate: string, from: string, to: string): void => {
+    let byNode = table.get(predicate)
+    if (byNode === undefined) {
+      byNode = new Map()
+      table.set(predicate, byNode)
+    }
+    const list = byNode.get(from)
+    if (list === undefined) byNode.set(from, [to])
+    else list.push(to)
+  }
+  const admit = (fact: Fact): void => {
+    link(outgoing, fact.predicate, fact.subject, fact.object)
+    link(incoming, fact.predicate, fact.object, fact.subject)
+    queue.push(fact)
   }
 
-  for (let round = 0; round < MAX_ENTAILMENT_ROUNDS; round += 1) {
-    let grew = false
-    const current: Fact[] = [...graph.facts.values(), ...derived.values()]
+  for (const fact of graph.facts.values()) {
+    if (relationOf(graph, fact.predicate)?.rangeKind === 'entity') admit(fact)
+  }
 
-    for (const fact of current) {
-      const relation = relationOf(graph, fact.predicate)
-      if (relation === undefined || relation.rangeKind !== 'entity') continue
+  const add = (fact: Fact, via: DerivedFact['via']): void => {
+    const key = factKey(fact.subject, fact.predicate, fact.object)
+    if (known.has(key)) return
+    if (derived.length >= limit) {
+      truncated = true
+      return
+    }
+    known.add(key)
+    const result: DerivedFact = { ...fact, via }
+    derived.push(result)
+    admit(result)
+  }
 
-      if (relation.inverseOf !== undefined && relation.inverseOf !== relation.id) {
-        grew = add({ ...fact, subject: fact.object, predicate: relation.inverseOf, object: fact.subject }, 'inverse') || grew
+  for (let head = 0; head < queue.length && !truncated; head += 1) {
+    const fact = queue[head]!
+    const relation = relationOf(graph, fact.predicate)
+    if (relation === undefined) continue
+
+    if (relation.inverseOf !== undefined && relation.inverseOf !== relation.id) {
+      add({ ...fact, subject: fact.object, predicate: relation.inverseOf, object: fact.subject }, 'inverse')
+    }
+    if (relation.characteristics.includes('symmetric')) {
+      add({ ...fact, subject: fact.object, object: fact.subject }, 'symmetric')
+    }
+    if (relation.characteristics.includes('transitive')) {
+      // (s p o) + (o p x) ⇒ (s p x); (x p s) + (s p o) ⇒ (x p o). Copy the
+      // neighbour lists first: `add` appends to them while we iterate.
+      for (const next of [...(outgoing.get(relation.id)?.get(fact.object) ?? [])]) {
+        if (next === fact.subject) continue // no self-loop from a round trip
+        add({ ...fact, object: next }, 'transitive')
       }
-      if (relation.characteristics.includes('symmetric')) {
-        grew = add({ ...fact, subject: fact.object, object: fact.subject }, 'symmetric') || grew
-      }
-      if (relation.characteristics.includes('transitive')) {
-        for (const next of current) {
-          if (next.predicate !== fact.predicate || next.subject !== fact.object) continue
-          if (next.object === fact.subject) continue // no self-loop from a round trip
-          grew = add({ ...fact, object: next.object }, 'transitive') || grew
-        }
+      for (const previous of [...(incoming.get(relation.id)?.get(fact.subject) ?? [])]) {
+        if (previous === fact.object) continue
+        add({ ...fact, subject: previous }, 'transitive')
       }
     }
-    if (!grew) break
   }
-  return [...derived.values()]
+  return { facts: derived, truncated }
 }
 
 /**
@@ -525,8 +634,70 @@ export function entail(graph: GraphView, limit = 20000): DerivedFact[] {
  * @returns every fact in scope, asserted first.
  */
 export function allFacts(graph: GraphView, includeInferred: boolean): DerivedFact[] {
-  const base: DerivedFact[] = [...graph.facts.values()].map(fact => ({ ...fact, via: 'asserted' as const }))
-  return includeInferred ? [...base, ...entail(graph)] : base
+  return [...factIndex(graph, includeInferred).facts]
+}
+
+// ---------------------------------------------------------------------------
+// Fact index
+// ---------------------------------------------------------------------------
+
+/**
+ * The facts in scope for one read, indexed by each triple position. Built once
+ * per graph view and inference setting, then shared by every query against
+ * that generation.
+ */
+export interface FactIndex {
+  /** Every fact in scope, asserted before entailed. */
+  readonly facts: readonly DerivedFact[]
+  readonly bySubject: ReadonlyMap<string, readonly DerivedFact[]>
+  readonly byPredicate: ReadonlyMap<string, readonly DerivedFact[]>
+  /** Keyed by the object string, whether entity id or literal value. */
+  readonly byObject: ReadonlyMap<string, readonly DerivedFact[]>
+  /** Whether entailment was cut short; always `false` without inference. */
+  readonly truncated: boolean
+}
+
+const indexCache = new WeakMap<GraphView, Map<number, FactIndex>>()
+
+/**
+ * Index the facts in scope. Memoized per graph view and inference limit.
+ * @param graph - The graph to read.
+ * @param includeInferred - Whether entailed facts are in scope.
+ * @param inferenceLimit - Derivation cap passed to {@link entailment}.
+ * @returns the index.
+ */
+export function factIndex(graph: GraphView, includeInferred: boolean, inferenceLimit = DEFAULT_ENTAILMENT_LIMIT): FactIndex {
+  let slot = indexCache.get(graph)
+  if (slot === undefined) {
+    slot = new Map()
+    indexCache.set(graph, slot)
+  }
+  // Asserted-only indexes are the same whatever the limit; key them on -1.
+  const cacheKey = includeInferred ? inferenceLimit : -1
+  const cached = slot.get(cacheKey)
+  if (cached !== undefined) return cached
+
+  const asserted: DerivedFact[] = []
+  for (const fact of graph.facts.values()) asserted.push({ ...fact, via: 'asserted' })
+  const derivation = includeInferred ? entailment(graph, inferenceLimit) : undefined
+  const facts = derivation === undefined ? asserted : [...asserted, ...derivation.facts]
+
+  const bySubject = new Map<string, DerivedFact[]>()
+  const byPredicate = new Map<string, DerivedFact[]>()
+  const byObject = new Map<string, DerivedFact[]>()
+  const push = (table: Map<string, DerivedFact[]>, key: string, fact: DerivedFact): void => {
+    const list = table.get(key)
+    if (list === undefined) table.set(key, [fact])
+    else list.push(fact)
+  }
+  for (const fact of facts) {
+    push(bySubject, fact.subject, fact)
+    push(byPredicate, fact.predicate, fact)
+    push(byObject, fact.object, fact)
+  }
+  const index: FactIndex = { facts, bySubject, byPredicate, byObject, truncated: derivation?.truncated ?? false }
+  slot.set(cacheKey, index)
+  return index
 }
 
 // ---------------------------------------------------------------------------
@@ -557,7 +728,11 @@ export function queryEntities(graph: GraphView, query: EntityQuery): Entity[] {
   const needle = query.search?.toLowerCase()
   const matches: Entity[] = []
   for (const entity of graph.entities.values()) {
-    if (wanted !== undefined && ![...entityClasses(graph, entity.id)].some(id => wanted.has(id))) continue
+    if (wanted !== undefined) {
+      // Direct membership is the common case; walk ancestors only when needed.
+      const direct = entity.classes.some(id => wanted.has(id))
+      if (!direct && ![...classesOf(graph, entity)].some(id => wanted.has(id))) continue
+    }
     if (needle !== undefined) {
       const haystack = `${entity.id}\n${entity.label ?? ''}\n${entity.comment ?? ''}`.toLowerCase()
       if (!haystack.includes(needle)) continue
@@ -574,21 +749,36 @@ export interface FactQuery {
   readonly predicate?: string
   readonly object?: string
   readonly includeInferred?: boolean
+  /** Derivation cap when `includeInferred`; defaults to {@link DEFAULT_ENTAILMENT_LIMIT}. */
+  readonly inferenceLimit?: number
   readonly limit?: number
 }
 
 /**
- * Find facts by triple pattern.
+ * Find facts by triple pattern, scanning only the index bucket of the most
+ * selective bound position.
  * @param graph - The graph to read.
  * @param query - The pattern; each omitted position matches anything.
  * @returns matching facts, asserted before entailed.
  */
 export function queryFacts(graph: GraphView, query: FactQuery): DerivedFact[] {
-  const matches = allFacts(graph, query.includeInferred ?? false).filter(fact =>
-    (query.subject === undefined || fact.subject === query.subject)
-    && (query.predicate === undefined || fact.predicate === query.predicate)
-    && (query.object === undefined || fact.object === query.object))
-  return query.limit === undefined ? matches : matches.slice(0, query.limit)
+  const index = factIndex(graph, query.includeInferred ?? false, query.inferenceLimit)
+  const candidates = query.subject !== undefined
+    ? index.bySubject.get(query.subject) ?? []
+    : query.object !== undefined
+      ? index.byObject.get(query.object) ?? []
+      : query.predicate !== undefined
+        ? index.byPredicate.get(query.predicate) ?? []
+        : index.facts
+  const matches: DerivedFact[] = []
+  for (const fact of candidates) {
+    if (query.subject !== undefined && fact.subject !== query.subject) continue
+    if (query.predicate !== undefined && fact.predicate !== query.predicate) continue
+    if (query.object !== undefined && fact.object !== query.object) continue
+    matches.push(fact)
+    if (query.limit !== undefined && matches.length >= query.limit) break
+  }
+  return matches
 }
 
 /**
@@ -598,6 +788,7 @@ export function queryFacts(graph: GraphView, query: FactQuery): DerivedFact[] {
  * @param entityId - The centre.
  * @param depth - Radius in edges; values below 1 are treated as 1.
  * @param includeInferred - Whether entailed edges participate.
+ * @param inferenceLimit - Derivation cap when `includeInferred`.
  * @returns the reached entity ids and the facts that reached them.
  */
 export function neighbors(
@@ -605,21 +796,25 @@ export function neighbors(
   entityId: string,
   depth: number,
   includeInferred: boolean,
+  inferenceLimit = DEFAULT_ENTAILMENT_LIMIT,
 ): { readonly reached: string[], readonly facts: DerivedFact[] } {
-  const facts = allFacts(graph, includeInferred)
+  const index = factIndex(graph, includeInferred, inferenceLimit)
   const reached = new Set<string>([entityId])
   const collected = new Map<string, DerivedFact>()
   let frontier = new Set<string>([entityId])
 
   for (let step = 0; step < Math.max(1, depth); step += 1) {
     const next = new Set<string>()
-    for (const fact of facts) {
-      const outgoing = frontier.has(fact.subject)
-      const incoming = fact.objectKind === 'entity' && frontier.has(fact.object)
-      if (!outgoing && !incoming) continue
-      collected.set(factKey(fact.subject, fact.predicate, fact.object), fact)
-      if (outgoing && fact.objectKind === 'entity' && !reached.has(fact.object)) next.add(fact.object)
-      if (incoming && !reached.has(fact.subject)) next.add(fact.subject)
+    for (const node of frontier) {
+      for (const fact of index.bySubject.get(node) ?? []) {
+        collected.set(factKey(fact.subject, fact.predicate, fact.object), fact)
+        if (fact.objectKind === 'entity' && !reached.has(fact.object)) next.add(fact.object)
+      }
+      for (const fact of index.byObject.get(node) ?? []) {
+        if (fact.objectKind !== 'entity') continue
+        collected.set(factKey(fact.subject, fact.predicate, fact.object), fact)
+        if (!reached.has(fact.subject)) next.add(fact.subject)
+      }
     }
     if (next.size === 0) break
     for (const id of next) reached.add(id)
@@ -636,6 +831,7 @@ export function neighbors(
  * @param to - Target entity.
  * @param maxDepth - Maximum path length in edges.
  * @param includeInferred - Whether entailed edges participate.
+ * @param inferenceLimit - Derivation cap when `includeInferred`.
  * @returns the edges of one shortest path, or `undefined` when unreachable.
  */
 export function findPath(
@@ -644,24 +840,40 @@ export function findPath(
   to: string,
   maxDepth: number,
   includeInferred: boolean,
+  inferenceLimit = DEFAULT_ENTAILMENT_LIMIT,
 ): DerivedFact[] | undefined {
   if (from === to) return []
-  const facts = allFacts(graph, includeInferred).filter(fact => fact.objectKind === 'entity')
+  const index = factIndex(graph, includeInferred, inferenceLimit)
+  /** Predecessor edge of each visited node, for path reconstruction. */
+  const cameFrom = new Map<string, { readonly via: DerivedFact, readonly from: string }>()
   const visited = new Set<string>([from])
-  let frontier: { readonly id: string, readonly path: DerivedFact[] }[] = [{ id: from, path: [] }]
+  let frontier = [from]
+
+  const reconstruct = (end: string): DerivedFact[] => {
+    const path: DerivedFact[] = []
+    let node = end
+    while (node !== from) {
+      const step = cameFrom.get(node)!
+      path.push(step.via)
+      node = step.from
+    }
+    return path.reverse()
+  }
 
   for (let step = 0; step < Math.max(1, maxDepth); step += 1) {
-    const next: { id: string, path: DerivedFact[] }[] = []
+    const next: string[] = []
     for (const node of frontier) {
-      for (const fact of facts) {
-        const forward = fact.subject === node.id
-        const other = forward ? fact.object : fact.subject
-        if (!forward && fact.object !== node.id) continue
+      const edges = [
+        ...(index.bySubject.get(node) ?? []).filter(fact => fact.objectKind === 'entity'),
+        ...(index.byObject.get(node) ?? []).filter(fact => fact.objectKind === 'entity'),
+      ]
+      for (const fact of edges) {
+        const other = fact.subject === node ? fact.object : fact.subject
         if (visited.has(other)) continue
-        const path = [...node.path, fact]
-        if (other === to) return path
         visited.add(other)
-        next.push({ id: other, path })
+        cameFrom.set(other, { via: fact, from: node })
+        if (other === to) return reconstruct(other)
+        next.push(other)
       }
     }
     if (next.length === 0) break

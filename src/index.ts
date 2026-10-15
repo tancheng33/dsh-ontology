@@ -35,6 +35,12 @@ export interface Config {
   strict: boolean
   /** Whether queries may return facts entailed by relation characteristics. */
   inference: boolean
+  /**
+   * Cap on derived facts per read generation. Reaching it marks inferred
+   * results incomplete rather than failing; raise it for graphs whose
+   * transitive closures are large.
+   */
+  maxInferred: number
   /** Whether to contribute the vocabulary section to the system prompt. */
   promptSection: boolean
   /** Upper bound on vocabulary lines in that section. */
@@ -53,6 +59,7 @@ export const Config: Schema<Config> = Schema.object({
   domain: Schema.string().default('ontology'),
   strict: Schema.boolean().default(true),
   inference: Schema.boolean().default(true),
+  maxInferred: Schema.number().default(20000),
   promptSection: Schema.boolean().default(true),
   promptMaxTerms: Schema.number().default(60),
   // Tool guidance conventionally occupies 100–199.
@@ -82,6 +89,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   for (const tool of createOntologyTools({
     store,
     inference: config.inference,
+    inferenceLimit: config.maxInferred,
     defaultLimit: config.defaultLimit,
     maxLimit: config.maxLimit,
     now: () => new Date().toISOString(),

@@ -1,6 +1,6 @@
 {
   "name": "dsh-ontology",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A typed, inference-capable ontology (TBox + ABox) plugin for DeepSeek Harness — durable domain knowledge the agent can define, assert against, and query under schema constraints.",
   "keywords": [
     "dsh",
@@ -59,7 +59,9 @@
     "prepare": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "smoke": "node scripts/smoke/run.mjs",
+    "bench": "node bench/bench.ts"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",

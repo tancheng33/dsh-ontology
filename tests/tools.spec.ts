@@ -277,12 +277,13 @@ describe('system prompt section', () => {
     expect(text).toContain('ontology_define')
   })
 
-  it('carries the vocabulary and the counts once populated', async () => {
+  it('carries the vocabulary but not the counts once populated', async () => {
     await defineVocabulary()
     await run('ontology_assert', { entities: [{ id: 'api', classes: ['Service'] }] })
     const text = renderOntologySection(store.graph, 60)
-    expect(text).toContain('3 classes, 3 relations, 1 entities, 0 facts')
     expect(text).toContain('- class Service < Component')
+    // Counts change on every write and would bust the cached prompt prefix.
+    expect(text).not.toMatch(/\d+ (classes|entities|facts)/)
     // Instance data stays behind the query tool; only vocabulary is standing context.
     expect(text).not.toContain('api')
   })

@@ -59,6 +59,7 @@ Override any of these in your profile's `cordis.patch.yml`:
 | `domain` | `ontology` | Storage domain name; one name is one isolated graph. Must match `/^[a-z][a-z0-9_]*$/`. |
 | `strict` | `true` | Reject facts that violate the vocabulary. `false` stores them with the violations recorded, for exploratory modelling. |
 | `inference` | `true` | Allow queries to return entailed facts. |
+| `maxInferred` | `20000` | Cap on derived facts per read. Past it, results carry `inferenceTruncated: true` and the rendered text says so; raise it for graphs with large transitive closures. |
 | `promptSection` | `true` | Contribute the vocabulary summary to the system prompt. |
 | `promptMaxTerms` | `60` | Upper bound on terms in that summary. |
 | `promptOrder` | `150` | Where the section lands in the assembled prompt. |
@@ -71,9 +72,9 @@ Running two isolated graphs is just two rows:
 - insert:
     - id: ontology-team
       name: dsh-ontology
-      config: { domain: team_ontology, strict: true, inference: true, promptSection: true,
-                promptMaxTerms: 60, promptOrder: 150, defaultLimit: 50, maxLimit: 500,
-                maxEntities: 20000, maxFacts: 100000 }
+      config: { domain: team_ontology, strict: true, inference: true, maxInferred: 20000,
+                promptSection: true, promptMaxTerms: 60, promptOrder: 150,
+                defaultLimit: 50, maxLimit: 500, maxEntities: 20000, maxFacts: 100000 }
 ```
 
 (A patch replaces a row's whole `config`, so restate every key.)
@@ -169,6 +170,23 @@ connected in 3 step(s):
 
 **Retraction safety.** Retracting an entity cascades to every fact mentioning it. Retracting a *term* is refused while anything still depends on it — a class that still classifies an entity or appears in a relation signature, a relation still asserted — and the refusal names the dependent.
 
+## Scale
+
+Reads are indexed and memoized per write generation: the first query after a write derives the closure once (a worklist fixpoint over an adjacency index, not a quadratic scan), and every query until the next write reuses it. Writes keep a subject index so a `functional` check costs the subject's degree, not a table scan. On a 21k-entity / 101k-fact synthetic dependency graph (`pnpm bench 20000 3`, Apple Silicon):
+
+| Operation | Before 0.2 | 0.2 |
+|---|---|---|
+| assert 101k facts in batches of 500 | 340 s | 0.5 s |
+| first inferred query after a write | > 6 s at 10k facts | 0.1 s |
+| repeated inferred queries | > 6 s each | < 1 ms |
+| shortest path, depth 8, inferred | > 6 s | 16 ms |
+
+Entailment stops at `maxInferred` derived facts and says so rather than silently returning a prefix of the closure.
+
+The storage medium is the default `dsh-storage-json` unit (one JSON document per domain, rewritten atomically per write). For graphs in the tens of thousands of facts, override the `storage-json` row in your profile patch with `dsh-storage-sqlite`; the plugin does not care which backend serves its domain.
+
+The prompt section is assembled once per turn by the harness, so vocabulary defined during a turn appears in the standing context from the next turn on.
+
 ## Code Mode
 
 Every tool is reachable as a typed call, with the canonical JSON value (not the rendered prose) as the result:
@@ -192,12 +210,16 @@ import { entail, findPath, validateFactInput } from 'dsh-ontology/ontology'
 
 ```sh
 pnpm install
-pnpm test        # 47 unit tests: rules, tools, prompt section
+pnpm test        # 49 unit tests: rules, tools, prompt section
 pnpm typecheck
 pnpm build
+pnpm smoke       # boot smoke against a real dsh profile (see below)
+pnpm bench 2000 3
 ```
 
 `tests/memory-domain.ts` is an in-memory stand-in for one open storage domain, so the store and the tools are tested end to end — real validation, real entailment, real tool results — without a backend.
+
+`pnpm smoke` is the test the unit suite cannot be. It installs the packed tarball into a fresh dsh profile created from the shipped `headless` template (so `dsh-base` is present), boots it against a scripted local LLM that speaks both wire formats the harness has used, drives `ontology_define` → `ontology_assert` → `ontology_query` with inference, then boots a second time over the same `$DSH_HOME` to check persistence and that the prompt section now carries the vocabulary. No network beyond the npm registry, no API key. `DSH_VERSION` picks the harness (CI runs the oldest supported line and `next`); `DSH_BIN` reuses an installed one; `SMOKE_PLUGIN_SPEC=dsh-ontology@0.1.0` demonstrates that the test catches the duplicate-storage-row boot crash of that release.
 
 ## Requirements
 

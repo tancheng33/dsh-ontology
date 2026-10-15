@@ -7,10 +7,10 @@
  */
 
 import type { Domain, KvTable } from '@deepseek-ai/dsh-storage-domain'
-import { factKey, validateEntityInput, validateFactInput, validateClassInput, validateRelationInput } from './ontology.ts'
+import { factIndex, factKey, validateEntityInput, validateFactInput, validateClassInput, validateRelationInput } from './ontology.ts'
 import type { ClassInput, EntityInput, FactInput, RelationInput } from './ontology.ts'
 import type { OntologyDomainSpec } from './spec.ts'
-import type { Entity, Fact, GraphView, RangeKind, Term, Violation } from './types.ts'
+import type { Entity, Fact, GraphTable, GraphView, RangeKind, Term, Violation } from './types.ts'
 
 /** Deployment limits the store enforces before writing. */
 export interface StoreLimits {
@@ -30,12 +30,50 @@ export interface WriteOutcome {
 const ACCEPTED: WriteOutcome = { ok: true, violations: [] }
 
 /**
+ * A {@link GraphTable} over a live storage table. Storage reads are synchronous
+ * from memory and `entries()` is already a snapshot, so no copy is needed; the
+ * adapter exists so a graph view costs nothing to hand out.
+ */
+class TableView<V> implements GraphTable<V> {
+  readonly #table: KvTable<string, V>
+
+  constructor(table: KvTable<string, V>) {
+    this.#table = table
+  }
+
+  get size(): number {
+    return this.#table.size
+  }
+
+  get(key: string): V | undefined {
+    return this.#table.get(key)
+  }
+
+  has(key: string): boolean {
+    return this.#table.get(key) !== undefined
+  }
+
+  keys(): Iterable<string> {
+    return this.#table.keys()
+  }
+
+  * values(): Iterable<V> {
+    for (const [, value] of this.#table.entries()) yield value
+  }
+
+  entries(): Iterable<[string, V]> {
+    return this.#table.entries()
+  }
+}
+
+/**
  * A live ontology over one open storage domain.
  *
- * Reads project the tables into an immutable {@link GraphView}, memoized until
- * the next write, so a burst of queries in one tool call costs one projection
- * rather than one per query. Writes go through the same validators the tools
- * expose, so nothing reaches the medium unchecked.
+ * Reads see the tables through one {@link GraphView} object per write
+ * generation. The view itself copies nothing; its identity is what the pure
+ * core keys its memoized entailment and indexes on, so a burst of queries
+ * between two writes derives once. Writes go through the same validators the
+ * tools expose, so nothing reaches the medium unchecked.
  */
 export class OntologyStore {
   readonly #terms: KvTable<string, Term>
@@ -43,6 +81,12 @@ export class OntologyStore {
   readonly #facts: KvTable<string, Fact>
   readonly #limits: StoreLimits
   #cache: GraphView | undefined
+  /**
+   * Asserted facts by subject, maintained across writes so the per-fact
+   * `functional` check costs the subject's degree, not a table scan. Built
+   * lazily from the table on first use.
+   */
+  #bySubject: Map<string, Map<string, Fact>> | undefined
 
   /**
    * @param domain - The opened ontology domain.
@@ -55,14 +99,42 @@ export class OntologyStore {
     this.#limits = limits
   }
 
-  /** The current graph, projected once per write generation. */
+  /** The current graph view; one object per write generation. */
   get graph(): GraphView {
     this.#cache ??= {
-      terms: new Map(this.#terms.entries()),
-      entities: new Map(this.#entities.entries()),
-      facts: new Map(this.#facts.entries()),
+      terms: new TableView(this.#terms),
+      entities: new TableView(this.#entities),
+      facts: new TableView(this.#facts),
+      factsBySubject: subject => this.#subjectIndex().get(subject)?.values() ?? [],
     }
     return this.#cache
+  }
+
+  /** The subject index, built on first use. */
+  #subjectIndex(): Map<string, Map<string, Fact>> {
+    if (this.#bySubject === undefined) {
+      this.#bySubject = new Map()
+      for (const [key, fact] of this.#facts.entries()) this.#indexFact(key, fact)
+    }
+    return this.#bySubject
+  }
+
+  #indexFact(key: string, fact: Fact): void {
+    if (this.#bySubject === undefined) return
+    let bucket = this.#bySubject.get(fact.subject)
+    if (bucket === undefined) {
+      bucket = new Map()
+      this.#bySubject.set(fact.subject, bucket)
+    }
+    bucket.set(key, fact)
+  }
+
+  #unindexFact(key: string, fact: Fact | undefined): void {
+    if (this.#bySubject === undefined || fact === undefined) return
+    const bucket = this.#bySubject.get(fact.subject)
+    if (bucket === undefined) return
+    bucket.delete(key)
+    if (bucket.size === 0) this.#bySubject.delete(fact.subject)
   }
 
   /**
@@ -195,7 +267,10 @@ export class OntologyStore {
       violations: violations.map(violation => violation.message),
       createdAt: now,
     }
-    await this.#write(() => this.#facts.put(key, fact))
+    await this.#write(async () => {
+      await this.#facts.put(key, fact)
+      this.#indexFact(key, fact)
+    })
     return { ok: true, violations }
   }
 
@@ -257,15 +332,21 @@ export class OntologyStore {
    */
   async retractEntity(id: string): Promise<{ readonly removed: boolean, readonly facts: number }> {
     const existed = this.#entities.get(id) !== undefined
-    const doomed: string[] = []
-    for (const [key, fact] of this.#facts.entries()) {
-      if (fact.subject === id || (fact.objectKind === 'entity' && fact.object === id)) doomed.push(key)
+    const index = factIndex(this.graph, false)
+    const doomed = new Set<string>()
+    for (const fact of index.bySubject.get(id) ?? []) doomed.add(factKey(fact.subject, fact.predicate, fact.object))
+    for (const fact of index.byObject.get(id) ?? []) {
+      if (fact.objectKind === 'entity') doomed.add(factKey(fact.subject, fact.predicate, fact.object))
     }
     await this.#write(async () => {
-      for (const key of doomed) await this.#facts.delete(key)
+      for (const key of doomed) {
+        const fact = this.#facts.get(key)
+        await this.#facts.delete(key)
+        this.#unindexFact(key, fact)
+      }
       if (existed) await this.#entities.delete(id)
     })
-    return { removed: existed, facts: doomed.length }
+    return { removed: existed, facts: doomed.size }
   }
 
   /**
@@ -280,13 +361,15 @@ export class OntologyStore {
     const key = factKey(subject, predicate, object)
     let removed = false
     await this.#write(async () => {
+      const fact = this.#facts.get(key)
       removed = await this.#facts.delete(key)
+      this.#unindexFact(key, fact)
     })
     return removed
   }
 
   /**
-   * Run one durable mutation and drop the memoized projection afterwards.
+   * Run one durable mutation and start a new read generation afterwards.
    * @param mutate - The write to perform.
    */
   async #write(mutate: () => Promise<unknown>): Promise<void> {
