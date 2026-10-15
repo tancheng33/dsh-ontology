@@ -356,6 +356,111 @@ export function validateRelationInput(graph: GraphView, input: RelationInput): V
 }
 
 // ---------------------------------------------------------------------------
+// Redefinition
+// ---------------------------------------------------------------------------
+
+/** A {@link GraphTable} that answers one key from an override, the rest from a base table. */
+class OverlayTable<V> implements GraphTable<V> {
+  readonly #base: GraphTable<V>
+  readonly #key: string
+  readonly #value: V
+
+  constructor(base: GraphTable<V>, key: string, value: V) {
+    this.#base = base
+    this.#key = key
+    this.#value = value
+  }
+
+  get size(): number {
+    return this.#base.has(this.#key) ? this.#base.size : this.#base.size + 1
+  }
+
+  get(key: string): V | undefined {
+    return key === this.#key ? this.#value : this.#base.get(key)
+  }
+
+  has(key: string): boolean {
+    return key === this.#key || this.#base.has(key)
+  }
+
+  * keys(): Iterable<string> {
+    yield* this.entriesWith(([key]) => key)
+  }
+
+  * values(): Iterable<V> {
+    yield* this.entriesWith(([, value]) => value)
+  }
+
+  * entries(): Iterable<[string, V]> {
+    yield* this.entriesWith(entry => entry)
+  }
+
+  private * entriesWith<T>(project: (entry: [string, V]) => T): Iterable<T> {
+    let seen = false
+    for (const [key, value] of this.#base.entries()) {
+      if (key === this.#key) {
+        seen = true
+        yield project([key, this.#value])
+      } else {
+        yield project([key, value])
+      }
+    }
+    if (!seen) yield project([this.#key, this.#value])
+  }
+}
+
+/** Upper bound on example facts quoted in a redefinition violation. */
+const REDEFINITION_EXAMPLES = 3
+
+/**
+ * Check what an already-populated graph would look like under a replacement
+ * definition of one term.
+ *
+ * Redefinition replaces a term wholesale, so narrowing a relation's domain,
+ * flipping its `rangeKind`, making it `functional`, or cutting a class out of
+ * a `subClassOf` chain can silently turn stored facts into violations of the
+ * very vocabulary that is supposed to govern them. This re-validates the
+ * affected facts against the would-be TBox — every fact of the relation, or
+ * every fact at all when a class changes (membership closure can shift any
+ * domain or range check) — and reports the ones that would no longer hold.
+ * @param graph - The current graph.
+ * @param term - The replacement definition.
+ * @returns one violation per invalidated fact, capped in message detail but
+ * not in count, as `redefinition-invalidates`; empty when the data still fits.
+ */
+export function validateRedefinition(graph: GraphView, term: Term): Violation[] {
+  if (!graph.terms.has(term.id)) return []
+  const overlay: GraphView = {
+    terms: new OverlayTable(graph.terms, term.id, term),
+    entities: graph.entities,
+    facts: graph.facts,
+  }
+  const affected: Iterable<Fact> = term.kind === 'relation'
+    ? factIndex(graph, false).byPredicate.get(term.id) ?? []
+    : graph.facts.values()
+
+  const broken: { fact: Fact, reasons: string[] }[] = []
+  for (const fact of affected) {
+    const reasons = validateFactInput(overlay, fact)
+      // A fact already stored with recorded violations (non-strict) is not
+      // newly broken by the redefinition when the same reasons were present.
+      .filter(violation => !fact.violations.includes(violation.message))
+    if (reasons.length > 0) broken.push({ fact, reasons: reasons.map(violation => violation.message) })
+  }
+  if (broken.length === 0) return []
+
+  const examples = broken.slice(0, REDEFINITION_EXAMPLES)
+    .map(({ fact, reasons }) => `${fact.subject} ${fact.predicate} ${fact.object}: ${reasons.join('; ')}`)
+  const more = broken.length > examples.length ? `; and ${broken.length - examples.length} more` : ''
+  return [{
+    code: 'redefinition-invalidates',
+    message: `redefining ${term.kind} ${term.id} would invalidate ${broken.length} asserted fact(s) — `
+      + `${examples.join(' | ')}${more}. Retract or correct them first, or redefine under strict: false `
+      + 'to keep them with the violations recorded',
+  }]
+}
+
+// ---------------------------------------------------------------------------
 // ABox validation
 // ---------------------------------------------------------------------------
 
