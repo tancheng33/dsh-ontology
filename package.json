@@ -1,6 +1,6 @@
 {
   "name": "dsh-ontology",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A typed, inference-capable ontology (TBox + ABox) plugin for DeepSeek Harness — durable domain knowledge the agent can define, assert against, and query under schema constraints.",
   "keywords": [
     "dsh",
@@ -67,15 +67,15 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-storage-domain": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6"
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.5-rc.2",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-storage-domain": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-storage-domain": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
     "@types/node": "^26.2.0",
     "tsdown": "^0.15.1",
     "typescript": "^5.9.2",

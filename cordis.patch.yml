@@ -1,27 +1,15 @@
 # The configuration layer this bundle contributes when a profile lists it.
 # Users override any key here from their own profile `cordis.patch.yml`.
 
-# The ontology is durable, so it needs the storage stack. `dsh-base` does not
-# ship one — `dsh-web-app` is what normally inserts these three rows — so this
-# bundle inserts them itself, under the SAME ids that bundle uses. Later layers
-# win per id, so a profile that already has the stack simply ends up with these
-# equivalent values instead of a second, competing backend. Change the medium
-# by overriding `storage-json` (or replacing it with `dsh-storage-sqlite`) in
-# your own profile patch.
+# The ontology is durable and needs the storage stack (`dsh-storage`,
+# `dsh-storage-json`, `dsh-storage-domain`). Since dsh-base 0.1.5 that stack is
+# part of `dsh-base`, which every profile ships, so this bundle contributes only
+# its own row. Plain `insert:` lists are appended, not deduplicated by id, so
+# re-inserting the storage rows here would make the loader throw
+# `duplicate loader entry id: storage` at boot (issue #1). Change the medium by
+# overriding `storage-json` (or replacing it with `dsh-storage-sqlite`) in your
+# own profile patch.
 - insert:
-    - id: storage
-      name: '@deepseek-ai/dsh-storage'
-
-    - id: storage-json
-      name: '@deepseek-ai/dsh-storage-json'
-      config:
-        root: !!js dshHomePath('storages')
-
-    - id: storage-domain
-      name: '@deepseek-ai/dsh-storage-domain'
-      config:
-        backend: json
-
     - id: ontology
       name: dsh-ontology
       config:

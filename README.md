@@ -48,7 +48,7 @@ dsh plugin --profile <name> add github:tancheng33/dsh-ontology
 
 > A `github:` install builds from source, so pnpm ≥10 needs the build allowlisted. Add `allowBuilds: { dsh-ontology: true }` to the profile's `pnpm-workspace.yaml` and re-run, and pin a commit (`#<sha>`) so a later push cannot silently change what runs. Installing from npm needs no allowance.
 
-The bundle brings its own storage stack (`dsh-storage` + `dsh-storage-json` + `dsh-storage-domain`) under the same row ids `dsh-web-app` uses, so it works in a bare profile and composes cleanly with one that already has storage. Data lands in `$DSH_HOME/storages/<domain>.json`.
+The ontology persists through the storage stack (`dsh-storage` + `dsh-storage-json` + `dsh-storage-domain`) that `dsh-base` ships since **dsh 0.1.5**, so the bundle contributes only its own `ontology` row. It therefore needs dsh ≥ 0.1.5-rc.2; on older harnesses add the three storage rows to your profile patch yourself. Data lands in `$DSH_HOME/storages/<domain>.json`.
 
 ## Configuration
 

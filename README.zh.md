@@ -48,7 +48,7 @@ dsh plugin --profile <名字> add github:tancheng33/dsh-ontology
 
 > `github:` 安装会从源码构建，pnpm ≥10 需要显式放行构建：在 profile 的 `pnpm-workspace.yaml` 里加 `allowBuilds: { dsh-ontology: true }` 后重跑；并且建议锁定 commit（`#<sha>`），以免后续推送悄悄改变你机器上实际运行的代码。从 npm 安装不需要任何放行。
 
-这个 bundle 自带 storage 栈（`dsh-storage` + `dsh-storage-json` + `dsh-storage-domain`），用的是和 `dsh-web-app` 相同的 row id——所以它在裸 profile 里能直接跑，装到已有 storage 的 profile 上也不会打架。数据落在 `$DSH_HOME/storages/<domain>.json`。
+本体通过 storage 栈（`dsh-storage` + `dsh-storage-json` + `dsh-storage-domain`）持久化，这套栈从 **dsh 0.1.5** 起由 `dsh-base` 自带，所以 bundle 只贡献自己的 `ontology` 一行。因此需要 dsh ≥ 0.1.5-rc.2；更老的 harness 请自行在 profile patch 里补上那三行 storage。数据落在 `$DSH_HOME/storages/<domain>.json`。
 
 ## 配置
 
