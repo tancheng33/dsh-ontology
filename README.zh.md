@@ -201,7 +201,7 @@ pnpm build
 
 ## 环境要求
 
-- DeepSeek Harness `>= 0.1.0-rc.6`
+- DeepSeek Harness `>= 0.1.5-rc.2`（dsh-base 需自带 storage 栈）
 - Node `^22.19 || >=24`
 
 ## 许可

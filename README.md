@@ -201,7 +201,7 @@ pnpm build
 
 ## Requirements
 
-- DeepSeek Harness `>= 0.1.0-rc.6`
+- DeepSeek Harness `>= 0.1.5-rc.2` (dsh-base must ship the storage stack)
 - Node `^22.19 || >=24`
 
 ## License
