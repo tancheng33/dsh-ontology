@@ -9,8 +9,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import {
-  allFacts,
+  DEFAULT_ENTAILMENT_LIMIT,
   classAncestors,
+  factIndex,
   findPath,
   neighbors,
   queryEntities,
@@ -27,6 +28,8 @@ export interface ToolContext {
   readonly store: OntologyStore
   /** Whether entailment is available at all; `false` forces `includeInferred` off. */
   readonly inference: boolean
+  /** Derivation cap per read generation; defaults to {@link DEFAULT_ENTAILMENT_LIMIT}. */
+  readonly inferenceLimit?: number
   /** Default and maximum result sizes for a query. */
   readonly defaultLimit: number
   readonly maxLimit: number
@@ -468,6 +471,10 @@ export function defineOntologyQueryTool(context: ToolContext): ToolDefinition {
           connected: { type: 'boolean', description: 'path mode: whether a path was found' },
           reached: { type: 'array', items: { type: 'string' } },
           truncated: { type: 'boolean', description: 'Whether the limit cut the result short' },
+          inferenceTruncated: {
+            type: 'boolean',
+            description: 'Whether entailment hit its derivation cap, so inferred results are incomplete',
+          },
         },
       },
       render: (_args, value) => [{ type: 'text', text: renderQuery(value) }],
@@ -477,16 +484,22 @@ export function defineOntologyQueryTool(context: ToolContext): ToolDefinition {
       const includeInferred = context.inference && (args.includeInferred ?? false)
       const limit = resolveLimit(args.limit, context)
       const depth = Math.max(1, Math.min(args.depth ?? 2, 8))
+      const inferenceLimit = context.inferenceLimit ?? DEFAULT_ENTAILMENT_LIMIT
+      /** Set only when inference was in scope and was cut short. */
+      const inferenceFlag = (): { inferenceTruncated?: boolean } =>
+        includeInferred && factIndex(graph, true, inferenceLimit).truncated ? { inferenceTruncated: true } : {}
 
       switch (args.mode) {
         case 'stats': {
           const stats = statsOf(graph)
+          const inferred = context.inference ? factIndex(graph, true, inferenceLimit) : undefined
           return {
             mode: 'stats',
             stats: {
               ...stats,
-              inferredFacts: context.inference ? allFacts(graph, true).length - stats.facts : 0,
+              inferredFacts: inferred === undefined ? 0 : inferred.facts.length - stats.facts,
             },
+            ...(inferred?.truncated === true ? { inferenceTruncated: true } : {}),
           }
         }
         case 'schema':
@@ -516,31 +529,34 @@ export function defineOntologyQueryTool(context: ToolContext): ToolDefinition {
             ...(args.predicate === undefined ? {} : { predicate: args.predicate }),
             ...(args.object === undefined ? {} : { object: args.object }),
             includeInferred,
+            inferenceLimit,
             limit: limit + 1,
           })
           const page = found.slice(0, limit)
-          return { mode: 'facts', facts: page.map(projectFact), truncated: found.length > page.length }
+          return { mode: 'facts', facts: page.map(projectFact), truncated: found.length > page.length, ...inferenceFlag() }
         }
         case 'neighbors': {
           if (args.entity === undefined) throw new Error('neighbors mode requires "entity"')
-          const result = neighbors(graph, args.entity, depth, includeInferred)
+          const result = neighbors(graph, args.entity, depth, includeInferred, inferenceLimit)
           const page = result.facts.slice(0, limit)
           return {
             mode: 'neighbors',
             reached: result.reached,
             facts: page.map(projectFact),
             truncated: result.facts.length > page.length,
+            ...inferenceFlag(),
           }
         }
         case 'path': {
           if (args.from === undefined || args.to === undefined) {
             throw new Error('path mode requires "from" and "to"')
           }
-          const path = findPath(graph, args.from, args.to, depth, includeInferred)
+          const path = findPath(graph, args.from, args.to, depth, includeInferred, inferenceLimit)
           return {
             mode: 'path',
             connected: path !== undefined,
             path: (path ?? []).map(projectFact),
+            ...inferenceFlag(),
           }
         }
         default:
@@ -566,6 +582,7 @@ function renderQuery(value: {
   connected?: boolean
   reached?: string[]
   truncated?: boolean
+  inferenceTruncated?: boolean
 }): string {
   const lines: string[] = []
 
@@ -611,6 +628,11 @@ function renderQuery(value: {
       lines.push(`unknown mode ${value.mode}`)
   }
   if (value.truncated === true) lines.push('… truncated; narrow the query or raise "limit"')
+  if (value.inferenceTruncated === true) {
+    lines.push(
+      '⚠ inference stopped at the derivation cap (maxInferred); inferred results are incomplete',
+    )
+  }
   return lines.join('\n')
 }
 

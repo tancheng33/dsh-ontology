@@ -10,6 +10,7 @@ import {
   classAncestors,
   classDescendants,
   entail,
+  entailment,
   entityClasses,
   factKey,
   findPath,
@@ -278,9 +279,43 @@ describe('entailment', () => {
     expect(derived.every(fact => fact.subject !== fact.object)).toBe(true)
   })
 
-  it('honors the derivation limit', async () => {
+  it('honors the derivation limit and reports the truncation', async () => {
     const store = await serviceGraph()
     expect(entail(store.graph, 1)).toHaveLength(1)
+    expect(entailment(store.graph, 1).truncated).toBe(true)
+    expect(entailment(store.graph).truncated).toBe(false)
+  })
+
+  it('memoizes derivation per write generation', async () => {
+    const store = await serviceGraph()
+    const first = entailment(store.graph)
+    expect(entailment(store.graph)).toBe(first)
+    await store.assertEntity({ id: 'cache', classes: ['Component'] }, NOW)
+    expect(entailment(store.graph)).not.toBe(first)
+  })
+
+  it('closes a long transitive chain through an inverse', async () => {
+    const store = newStore()
+    await store.defineClass({ id: 'Node' }, NOW)
+    await store.defineRelation({ id: 'above', domain: ['Node'], range: ['Node'] }, NOW)
+    await store.defineRelation({
+      id: 'below',
+      domain: ['Node'],
+      range: ['Node'],
+      characteristics: ['transitive'],
+      inverseOf: 'above',
+    }, NOW)
+    const n = 40
+    for (let i = 0; i <= n; i += 1) await store.assertEntity({ id: `n${i}`, classes: ['Node'] }, NOW)
+    for (let i = 0; i < n; i += 1) await store.assertFact({ subject: `n${i}`, predicate: 'below', object: `n${i + 1}` }, NOW)
+
+    const derived = entail(store.graph)
+    const below = derived.filter(fact => fact.predicate === 'below')
+    // Every ordered pair i < j except the n asserted adjacent ones.
+    expect(below).toHaveLength((n * (n + 1)) / 2 - n)
+    // The inverse is derived for every `below` pair, asserted or itself derived.
+    expect(derived.filter(fact => fact.predicate === 'above')).toHaveLength((n * (n + 1)) / 2)
+    expect(derived.some(fact => fact.subject === 'n0' && fact.predicate === 'below' && fact.object === `n${n}`)).toBe(true)
   })
 
   it('drops entailments once their premise is retracted', async () => {

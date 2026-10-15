@@ -23,6 +23,9 @@
         strict: true
         # Materialize inverse / symmetric / transitive entailments on query.
         inference: true
+        # Cap on derived facts per read; past it, inferred results are marked
+        # incomplete. Raise for graphs with large transitive closures.
+        maxInferred: 20000
         # Contribute a vocabulary summary to the system prompt so the model
         # knows the graph exists and what terms it already has.
         promptSection: true

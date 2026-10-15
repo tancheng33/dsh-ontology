@@ -13,8 +13,11 @@ import type { GraphView } from './types.ts'
  *
  * Deliberately vocabulary-only: the TBox is small, slow-moving, and cheap to
  * carry, while instance data is large, fast-moving, and belongs behind
- * `ontology_query`. An empty graph gets a different section — one that explains
- * what the graph is for — because listing nothing teaches the model nothing.
+ * `ontology_query`. Counts are left out too — they change on every write and
+ * would invalidate the cached prompt prefix each turn for no decision the
+ * model can make with them; `ontology_query` mode "stats" has them. An empty
+ * graph gets a different section — one that explains what the graph is for —
+ * because listing nothing teaches the model nothing.
  * @param graph - The current graph.
  * @param maxTerms - Upper bound on vocabulary lines.
  * @returns the section text.
@@ -41,9 +44,8 @@ export function renderOntologySection(graph: GraphView, maxTerms: number): strin
 
   lines.push(
     '',
-    `A durable, typed knowledge graph persists across sessions: ${stats.classes} classes, `
-    + `${stats.relations} relations, ${stats.entities} entities, ${stats.facts} facts. `
-    + 'Its declared vocabulary:',
+    'A durable, typed knowledge graph persists across sessions. Its declared vocabulary '
+    + '(instances are behind `ontology_query`; mode "stats" gives the counts):',
     '',
     ...renderTBox(graph, maxTerms).map(line => `- ${line}`),
     '',
