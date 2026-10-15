@@ -155,6 +155,7 @@ connected in 3 step(s):
 | `facts` | 哪些三元组匹配这个模式？省略的位置即通配符。 |
 | `neighbors` | 这个实体周围 N 跳内有什么？ |
 | `path` | 这两个实体是怎么连起来的？ |
+| `dump` | 把已断言的全部内容（词条、实体、事实）作为数据返回，用于导出或备份。重新导入就是 `ontology_define` + `ontology_assert`。 |
 
 ## 它强制的规则
 
@@ -169,6 +170,10 @@ connected in 3 step(s):
 **推理。** `transitive`、`symmetric`、`inverseOf` 会迭代到不动点，因此规则可以复合（传递关系的逆关系本身也做传递闭包）。推导出的事实**只在读取时导出，从不落盘**——撤回一个前提，所有依赖它的推论一并消失，不会留下过期派生数据。每条推论都带 `via` 标明是哪条规则产生的。
 
 **撤回安全。** 撤回实体会级联删除所有提到它的事实。撤回**词条**时，只要还有东西依赖它就会被拒绝——比如某个类还在给实体分类、还出现在某个关系的签名里，或某个关系还有事实在用——并且拒绝信息里会指出是谁在依赖它。
+
+**重定义安全。** 重定义会整体替换词条，所以已存事实会按新词汇重新检查：收窄 domain/range、翻转 `rangeKind`、给一个主语已有两个宾语的关系加 `functional`、把事实依赖的类从 `subClassOf` 链里拿掉，这些在 `strict` 下都会被拒绝，并指出会破坏哪些事实。`strict: false` 下照样生效，但把破坏情况作为 warning 返回。
+
+**合并。** 两个 id 其实是同一个个体时，用 `ontology_assert` 的 `merges: [{ from, into }]`：`from` 的全部事实改写到 `into` 上，类取并集，保留 `into` 的 label 和 comment（缺的从 `from` 补），然后删掉 `from`。改写后与已有三元组重合的会合并掉；改写会违反词汇约束的（`functional` 关系出现两个宾语）在 `strict` 下拒绝整次合并。
 
 ## Code Mode
 
@@ -210,7 +215,7 @@ import { entail, findPath, validateFactInput } from 'dsh-ontology/ontology'
 
 ```sh
 pnpm install
-pnpm test        # 49 个单测：规则、工具、提示词段落
+pnpm test        # 58 个单测：规则、工具、提示词段落
 pnpm typecheck
 pnpm build
 pnpm smoke       # 在真实 dsh profile 里做启动冒烟（见下）

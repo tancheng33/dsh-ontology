@@ -325,6 +325,99 @@ describe('entailment', () => {
   })
 })
 
+describe('redefinition', () => {
+  it('refuses to narrow a relation under facts that would no longer fit', async () => {
+    const store = await serviceGraph()
+    // `owns` is asserted as ada owns api; restricting its range to Database breaks that.
+    const outcome = await store.defineRelation({ id: 'owns', domain: ['Person'], range: ['Database'], inverseOf: 'owned_by' }, NOW)
+    expect(outcome.ok).toBe(false)
+    expect(outcome.violations[0]?.code).toBe('redefinition-invalidates')
+    expect(outcome.violations[0]?.message).toContain('ada owns api')
+    // The old definition still stands.
+    expect(store.graph.terms.get('owns')).toMatchObject({ range: ['Component'] })
+  })
+
+  it('refuses to flip rangeKind under literal facts, and to make a relation functional under two objects', async () => {
+    const store = await serviceGraph()
+    expect((await store.defineRelation({ id: 'version', domain: ['Component'], rangeKind: 'entity' }, NOW)).ok).toBe(false)
+
+    await store.assertEntity({ id: 'grace', classes: ['Person'] }, NOW)
+    await store.assertFact({ subject: 'grace', predicate: 'owns', object: 'api' }, NOW)
+    await store.assertFact({ subject: 'grace', predicate: 'owns', object: 'auth' }, NOW)
+    const functional = await store.defineRelation({
+      id: 'owns', domain: ['Person'], range: ['Component'], inverseOf: 'owned_by', characteristics: ['functional'],
+    }, NOW)
+    expect(functional.ok).toBe(false)
+    expect(functional.violations[0]?.message).toContain('functional')
+  })
+
+  it('refuses to cut a class out of the hierarchy its facts rely on', async () => {
+    const store = await serviceGraph()
+    // Service < Component makes api satisfy depends_on's Component domain.
+    const outcome = await store.defineClass({ id: 'Service' }, NOW)
+    expect(outcome.ok).toBe(false)
+    expect(outcome.violations[0]?.message).toContain('api depends_on auth')
+  })
+
+  it('accepts a compatible redefinition, and under strict: false applies an incompatible one with the damage reported', async () => {
+    const strict = await serviceGraph()
+    expect((await strict.defineRelation({ id: 'owns', domain: ['Person'], range: ['Component'], inverseOf: 'owned_by', comment: 'ownership' }, NOW)).ok).toBe(true)
+
+    const lenient = newStore(false)
+    await lenient.defineClass({ id: 'Component' }, NOW)
+    await lenient.defineClass({ id: 'Person' }, NOW)
+    await lenient.defineRelation({ id: 'owns', domain: ['Person'], range: ['Component'] }, NOW)
+    await lenient.assertEntity({ id: 'ada', classes: ['Person'] }, NOW)
+    await lenient.assertEntity({ id: 'api', classes: ['Component'] }, NOW)
+    await lenient.assertFact({ subject: 'ada', predicate: 'owns', object: 'api' }, NOW)
+    const outcome = await lenient.defineRelation({ id: 'owns', domain: ['Component'], range: ['Component'] }, NOW)
+    expect(outcome.ok).toBe(true)
+    expect(outcome.violations[0]?.code).toBe('redefinition-invalidates')
+    expect(lenient.graph.terms.get('owns')).toMatchObject({ domain: ['Component'] })
+  })
+})
+
+describe('merging entities', () => {
+  it('rewrites facts onto the survivor, unions classes, and drops the absorbed id', async () => {
+    const store = await serviceGraph()
+    await store.assertEntity({ id: 'api_v2', classes: ['Component'], comment: 'duplicate of api' }, NOW)
+    await store.assertFact({ subject: 'api_v2', predicate: 'depends_on', object: 'pg' }, NOW)
+    await store.assertFact({ subject: 'api_v2', predicate: 'depends_on', object: 'auth' }, NOW) // already held by api
+    await store.assertFact({ subject: 'ada', predicate: 'owns', object: 'api_v2' }, NOW)
+
+    const outcome = await store.mergeEntities('api_v2', 'api', NOW)
+    // Two of the three rewrites collapse onto triples api already holds.
+    expect(outcome).toMatchObject({ ok: true, facts: 1 })
+    expect(store.graph.entities.has('api_v2')).toBe(false)
+    expect(store.graph.entities.get('api')).toMatchObject({ classes: ['Service', 'Component'], comment: 'duplicate of api' })
+    const subjects = queryFacts(store.graph, { subject: 'api', predicate: 'depends_on' }).map(fact => fact.object).sort()
+    expect(subjects).toEqual(['auth', 'pg'])
+    expect(queryFacts(store.graph, { object: 'api_v2' })).toHaveLength(0)
+    expect(queryFacts(store.graph, { subject: 'ada', predicate: 'owns', object: 'api' })).toHaveLength(1)
+    expect(statsOf(store.graph).facts).toBe(5)
+  })
+
+  it('refuses a merge that would break a functional relation, and unknown or self merges', async () => {
+    const store = await serviceGraph()
+    await store.defineRelation({ id: 'owner', domain: ['Component'], range: ['Person'], characteristics: ['functional'] }, NOW)
+    await store.assertEntity({ id: 'grace', classes: ['Person'] }, NOW)
+    await store.assertFact({ subject: 'api', predicate: 'owner', object: 'ada' }, NOW)
+    await store.assertFact({ subject: 'auth', predicate: 'owner', object: 'grace' }, NOW)
+    const clash = await store.mergeEntities('auth', 'api', NOW)
+    expect(clash.ok).toBe(false)
+    expect(clash.violations[0]?.code).toBe('functional-conflict')
+    expect(store.graph.entities.has('auth')).toBe(true)
+
+    // Merging the two owners instead is fine: api owner ada, auth owner grace → both become ada.
+    const owners = await store.mergeEntities('grace', 'ada', NOW)
+    expect(owners.ok).toBe(true)
+    expect(queryFacts(store.graph, { predicate: 'owner', object: 'ada' })).toHaveLength(2)
+
+    expect((await store.mergeEntities('nobody', 'api', NOW)).violations[0]?.code).toBe('unknown-entity')
+    expect((await store.mergeEntities('api', 'api', NOW)).violations[0]?.code).toBe('merge-self')
+  })
+})
+
 describe('queries', () => {
   it('finds entities through subclasses', async () => {
     const graph = (await serviceGraph()).graph

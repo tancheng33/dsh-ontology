@@ -270,6 +270,44 @@ describe('configuration boundary', () => {
   })
 })
 
+describe('redefinition, merges, and dump through the tools', () => {
+  beforeEach(async () => {
+    await defineVocabulary()
+    await run('ontology_assert', {
+      entities: [{ id: 'api', classes: ['Service'] }, { id: 'api2', classes: ['Service'] }, { id: 'ada', classes: ['Person'] }],
+      facts: [{ subject: 'ada', predicate: 'owns', object: 'api' }, { subject: 'ada', predicate: 'owns', object: 'api2' }],
+    })
+  })
+
+  it('rejects an invalidating redefinition and says which facts it would break', async () => {
+    const value = await run('ontology_define', { relations: [{ id: 'owns', domain: ['Component'], range: ['Component'], inverseOf: 'owned_by' }] })
+    expect(value.relations).toEqual([])
+    const text = render('ontology_define', {}, value)
+    expect(text).toContain('REJECTED owns')
+    expect(text).toContain('ada owns api')
+  })
+
+  it('merges through ontology_assert and reports the rewrite count', async () => {
+    const value = await run('ontology_assert', { merges: [{ from: 'api2', into: 'api' }] })
+    expect(value.merged).toEqual(['api2 -> api (0 facts rewritten)'])
+    const facts = await run('ontology_query', { mode: 'facts', subject: 'ada' })
+    expect((facts.facts as { object: string }[]).map(fact => fact.object)).toEqual(['api'])
+    const missing = await run('ontology_assert', { merges: [{ from: 'api2', into: 'api' }] })
+    expect((missing.rejected as { ref: string }[])[0]?.ref).toBe('api2 -> api')
+  })
+
+  it('dumps the asserted graph as data', async () => {
+    const value = await run('ontology_query', { mode: 'dump' })
+    expect((value.terms as { id: string }[]).map(term => term.id).sort()).toEqual(['Component', 'Person', 'Service', 'depends_on', 'owned_by', 'owns'])
+    expect((value.entities as { id: string }[]).map(entity => entity.id).sort()).toEqual(['ada', 'api', 'api2'])
+    expect(value.facts).toHaveLength(2)
+    expect(value.truncated).toBe(false)
+    expect(render('ontology_query', { mode: 'dump' }, value)).toContain('6 term(s), 3 entity(ies), 2 fact(s)')
+    const capped = await run('ontology_query', { mode: 'dump', limit: 1 })
+    expect(capped.truncated).toBe(true)
+  })
+})
+
 describe('system prompt section', () => {
   it('invites the model to populate an empty graph', () => {
     const text = renderOntologySection(store.graph, 60)

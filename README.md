@@ -155,6 +155,7 @@ connected in 3 step(s):
 | `facts` | Which triples match this pattern? Each omitted position is a wildcard. |
 | `neighbors` | What surrounds this entity, out to depth N? |
 | `path` | How are these two entities connected? |
+| `dump` | Everything asserted — terms, entities, facts — as data, for export or backup. Re-import is `ontology_define` + `ontology_assert`. |
 
 ## The rules it enforces
 
@@ -169,6 +170,10 @@ connected in 3 step(s):
 **Entailment.** `transitive`, `symmetric`, and `inverseOf` are applied to a fixpoint, so the rules compose (the inverse of a transitive relation is itself closed transitively). Entailed facts are **derived on read and never stored** — retract a premise and everything resting on it disappears, with no stale derivation left behind. Each carries `via` naming the rule that produced it.
 
 **Retraction safety.** Retracting an entity cascades to every fact mentioning it. Retracting a *term* is refused while anything still depends on it — a class that still classifies an entity or appears in a relation signature, a relation still asserted — and the refusal names the dependent.
+
+**Redefinition safety.** Redefining a term replaces it wholesale, so the stored facts are re-checked against the would-be vocabulary: narrowing a domain or range, flipping `rangeKind`, adding `functional` over a subject that already has two objects, or cutting a class out of a `subClassOf` chain that facts rely on is refused under `strict`, naming the facts it would break. Under `strict: false` it is applied and the damage is returned as warnings.
+
+**Merging.** When two ids turn out to name one individual, `ontology_assert` with `merges: [{ from, into }]` rewrites every fact about `from` onto `into`, unions the classes, keeps `into`'s label and comment (filling gaps from `from`), and drops `from`. Rewrites that collide with existing triples collapse; a rewrite that would violate the vocabulary (a `functional` relation seeing two objects) refuses the merge under `strict`.
 
 ## Scale
 
@@ -210,7 +215,7 @@ import { entail, findPath, validateFactInput } from 'dsh-ontology/ontology'
 
 ```sh
 pnpm install
-pnpm test        # 49 unit tests: rules, tools, prompt section
+pnpm test        # 58 unit tests: rules, tools, prompt section
 pnpm typecheck
 pnpm build
 pnpm smoke       # boot smoke against a real dsh profile (see below)

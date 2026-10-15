@@ -157,7 +157,9 @@ export function defineOntologyDefineTool(context: ToolContext): ToolDefinition {
       + '(a part_of b, b part_of c ⇒ a part_of c), "symmetric" (both directions), '
       + '"functional" (at most one object per subject — a second one is rejected as a conflict). '
       + '"inverseOf" pairs a relation with its reverse (owns / owned_by). Order does not matter: '
-      + 'entries are resolved by repeated passes. Re-defining an existing term replaces it wholesale.',
+      + 'entries are resolved by repeated passes. Re-defining an existing term replaces it wholesale; '
+      + 'if that would invalidate facts already asserted, the redefinition is rejected (strict) or '
+      + 'applied with the invalidated facts listed as warnings (non-strict).',
     parameters: {
       classes: {
         type: 'array',
@@ -219,6 +221,12 @@ export function defineOntologyDefineTool(context: ToolContext): ToolDefinition {
           classes: { type: 'array', required: true, items: { type: 'string' } },
           relations: { type: 'array', required: true, items: { type: 'string' } },
           rejected: { ...rejectionSchema, required: true },
+          warnings: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+            description: 'Redefinitions applied under strict: false that invalidated stored facts',
+          },
         },
       },
       render: (_args, value) => {
@@ -227,6 +235,7 @@ export function defineOntologyDefineTool(context: ToolContext): ToolDefinition {
         ]
         if (value.classes.length > 0) lines.push(`classes: ${value.classes.join(', ')}`)
         if (value.relations.length > 0) lines.push(`relations: ${value.relations.join(', ')}`)
+        for (const warning of value.warnings) lines.push(`WARNING ${warning}`)
         for (const rejection of value.rejected) {
           lines.push(`REJECTED ${rejection.ref}: ${rejection.violations.join('; ')}`)
         }
@@ -238,6 +247,7 @@ export function defineOntologyDefineTool(context: ToolContext): ToolDefinition {
       const definedClasses: string[] = []
       const definedRelations: string[] = []
       const rejected: Rejection[] = []
+      const warnings: string[] = []
 
       // Repeated passes: a definition that only fails because a term it
       // references is later in the same call succeeds on the next pass.
@@ -255,6 +265,7 @@ export function defineOntologyDefineTool(context: ToolContext): ToolDefinition {
           if (outcome.ok) {
             if (item.kind === 'class') definedClasses.push(item.input.id)
             else definedRelations.push(item.input.id)
+            for (const violation of outcome.violations) warnings.push(`${item.input.id}: ${violation.message}`)
           } else {
             stillPending.push(item)
             failures.set(item.input.id, messagesOf(outcome.violations))
@@ -270,7 +281,7 @@ export function defineOntologyDefineTool(context: ToolContext): ToolDefinition {
         pending = stillPending
       }
 
-      return { classes: definedClasses, relations: definedRelations, rejected }
+      return { classes: definedClasses, relations: definedRelations, rejected, warnings }
     },
     presentCall: args => ({
       card: 'generic',
@@ -295,8 +306,22 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
       + 'in its domain, and the object must be a known entity in its range (or a literal, for a '
       + 'literal-valued relation). A rejected fact tells you exactly which constraint failed — fix '
       + 'the input or extend the vocabulary with ontology_define, do not work around it. '
-      + 'Re-asserting the same triple is idempotent; an entity\'s classes accumulate across calls.',
+      + 'Re-asserting the same triple is idempotent; an entity\'s classes accumulate across calls. '
+      + 'Use "merges" when two ids turn out to name the same individual: every fact about "from" is '
+      + 'rewritten onto "into", classes are unioned, and "from" disappears.',
     parameters: {
+      merges: {
+        type: 'array',
+        description: 'Entity pairs to merge, applied after the entities and facts of this call.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            from: { type: 'string', required: true, description: 'Entity id to absorb; removed' },
+            into: { type: 'string', required: true, description: 'Surviving entity id' },
+          },
+        },
+      },
       entities: {
         type: 'array',
         description: 'Individuals to record.',
@@ -342,12 +367,19 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
         properties: {
           entities: { type: 'array', required: true, items: { type: 'string' } },
           facts: { type: 'array', required: true, items: { type: 'string' } },
+          merged: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+            description: 'Completed merges as "from -> into (n facts rewritten)"',
+          },
           rejected: { ...rejectionSchema, required: true },
           warnings: { type: 'array', required: true, items: { type: 'string' } },
         },
       },
       render: (_args, value) => {
         const lines = [`asserted ${value.entities.length} entity(ies), ${value.facts.length} fact(s)`]
+        for (const merge of value.merged) lines.push(`merged ${merge}`)
         for (const warning of value.warnings) lines.push(`WARNING ${warning}`)
         for (const rejection of value.rejected) {
           lines.push(`REJECTED ${rejection.ref}: ${rejection.violations.join('; ')}`)
@@ -359,6 +391,7 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
       const now = context.now()
       const assertedEntities: string[] = []
       const assertedFacts: string[] = []
+      const merged: string[] = []
       const rejected: Rejection[] = []
       const warnings: string[] = []
 
@@ -380,12 +413,23 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
           warnings.push(`${ref}: ${messagesOf(outcome.violations).join('; ')}`)
         }
       }
-      return { entities: assertedEntities, facts: assertedFacts, rejected, warnings }
+      for (const merge of args.merges ?? []) {
+        const ref = `${merge.from} -> ${merge.into}`
+        const outcome = await context.store.mergeEntities(merge.from, merge.into, now)
+        if (!outcome.ok) {
+          rejected.push({ ref, violations: messagesOf(outcome.violations) })
+          continue
+        }
+        merged.push(`${ref} (${outcome.facts} facts rewritten)`)
+        if (outcome.violations.length > 0) warnings.push(`${ref}: ${messagesOf(outcome.violations).join('; ')}`)
+      }
+      return { entities: assertedEntities, facts: assertedFacts, merged, rejected, warnings }
     },
     presentCall: args => ({
       card: 'generic',
       kind: 'edit',
-      title: `ontology assert (${(args.entities ?? []).length} entity, ${(args.facts ?? []).length} fact)`,
+      title: `ontology assert (${(args.entities ?? []).length} entity, ${(args.facts ?? []).length} fact`
+        + `${(args.merges ?? []).length > 0 ? `, ${(args.merges ?? []).length} merge` : ''})`,
     }),
   })
 }
@@ -408,14 +452,15 @@ export function defineOntologyQueryTool(context: ToolContext): ToolDefinition {
       + 'know what exists); "stats" counts everything; "entities" finds individuals by class '
       + '(including subclasses) and/or a text match; "facts" matches a triple pattern, where each '
       + 'omitted position is a wildcard; "neighbors" expands outward from one entity to a bounded '
-      + 'depth; "path" finds the shortest chain of relations connecting two entities. Set '
+      + 'depth; "path" finds the shortest chain of relations connecting two entities; "dump" returns '
+      + 'the whole asserted graph (terms, entities, facts) as data, for export or backup. Set '
       + 'includeInferred to also get facts entailed by transitive/symmetric/inverse relations — '
       + 'those are derived on read and marked with how they were obtained.',
     parameters: {
       mode: {
         type: 'string',
         required: true,
-        enum: ['schema', 'stats', 'entities', 'facts', 'neighbors', 'path'],
+        enum: ['schema', 'stats', 'entities', 'facts', 'neighbors', 'path', 'dump'],
       },
       class: { type: 'string', description: 'entities mode: restrict to this class and its subclasses' },
       search: { type: 'string', description: 'entities mode: case-insensitive substring of id/label/comment' },
@@ -427,7 +472,7 @@ export function defineOntologyQueryTool(context: ToolContext): ToolDefinition {
       to: { type: 'string', description: 'path mode: target entity' },
       depth: { type: 'integer', description: 'neighbors/path mode: maximum edges to traverse (default 2)' },
       includeInferred: { type: 'boolean', description: 'Include entailed facts (default false)' },
-      limit: { type: 'integer', description: 'Maximum results' },
+      limit: { type: 'integer', description: 'Maximum results (dump mode: per collection, default the maximum)' },
     },
     output: {
       schema: {
@@ -435,6 +480,26 @@ export function defineOntologyQueryTool(context: ToolContext): ToolDefinition {
         additionalProperties: false,
         properties: {
           mode: { type: 'string', required: true },
+          terms: {
+            type: 'array',
+            description: 'dump mode: the vocabulary',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                kind: { type: 'string', required: true },
+                id: { type: 'string', required: true },
+                label: { type: 'string' },
+                comment: { type: 'string' },
+                subClassOf: { type: 'array', items: { type: 'string' } },
+                domain: { type: 'array', items: { type: 'string' } },
+                rangeKind: { type: 'string' },
+                range: { type: 'array', items: { type: 'string' } },
+                characteristics: { type: 'array', items: { type: 'string' } },
+                inverseOf: { type: 'string' },
+              },
+            },
+          },
           stats: {
             type: 'object',
             additionalProperties: false,
@@ -547,6 +612,43 @@ export function defineOntologyQueryTool(context: ToolContext): ToolDefinition {
             ...inferenceFlag(),
           }
         }
+        case 'dump': {
+          const cap = args.limit === undefined ? context.maxLimit : resolveLimit(args.limit, context)
+          const terms = [...graph.terms.values()]
+          const entities = [...graph.entities.values()]
+          const facts = factIndex(graph, false).facts
+          return {
+            mode: 'dump',
+            terms: terms.slice(0, cap).map(term => term.kind === 'class'
+              ? {
+                  kind: 'class',
+                  id: term.id,
+                  ...(term.label === undefined ? {} : { label: term.label }),
+                  ...(term.comment === undefined ? {} : { comment: term.comment }),
+                  subClassOf: [...term.subClassOf],
+                }
+              : {
+                  kind: 'relation',
+                  id: term.id,
+                  ...(term.label === undefined ? {} : { label: term.label }),
+                  ...(term.comment === undefined ? {} : { comment: term.comment }),
+                  domain: [...term.domain],
+                  rangeKind: term.rangeKind,
+                  range: [...term.range],
+                  characteristics: [...term.characteristics],
+                  ...(term.inverseOf === undefined ? {} : { inverseOf: term.inverseOf }),
+                }),
+            entities: entities.slice(0, cap).map(entity => ({
+              id: entity.id,
+              classes: [...entity.classes],
+              allClasses: [...entity.classes],
+              ...(entity.label === undefined ? {} : { label: entity.label }),
+              ...(entity.comment === undefined ? {} : { comment: entity.comment }),
+            })),
+            facts: facts.slice(0, cap).map(projectFact),
+            truncated: terms.length > cap || entities.length > cap || facts.length > cap,
+          }
+        }
         case 'path': {
           if (args.from === undefined || args.to === undefined) {
             throw new Error('path mode requires "from" and "to"')
@@ -574,6 +676,7 @@ export function defineOntologyQueryTool(context: ToolContext): ToolDefinition {
  */
 function renderQuery(value: {
   mode: string
+  terms?: { kind: string, id: string }[]
   stats?: { classes: number, relations: number, entities: number, facts: number, inferredFacts: number }
   schema?: string[]
   entities?: { id: string, classes: string[], allClasses: string[], label?: string, comment?: string }[]
@@ -615,6 +718,12 @@ function renderQuery(value: {
     case 'neighbors':
       lines.push(`reached ${(value.reached ?? []).length} entity(ies)`)
       for (const fact of value.facts ?? []) lines.push(factLine(fact))
+      break
+    case 'dump':
+      lines.push(
+        `${(value.terms ?? []).length} term(s), ${(value.entities ?? []).length} entity(ies), `
+        + `${(value.facts ?? []).length} fact(s); the structured value carries the full records`,
+      )
       break
     case 'path':
       if (value.connected === true) {

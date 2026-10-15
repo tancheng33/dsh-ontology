@@ -7,9 +7,10 @@
  */
 
 import type { Domain, KvTable } from '@deepseek-ai/dsh-storage-domain'
-import { factIndex, factKey, validateEntityInput, validateFactInput, validateClassInput, validateRelationInput } from './ontology.ts'
+import { factIndex, factKey, validateEntityInput, validateFactInput, validateClassInput, validateRedefinition, validateRelationInput } from './ontology.ts'
 import type { ClassInput, EntityInput, FactInput, RelationInput } from './ontology.ts'
 import type { OntologyDomainSpec } from './spec.ts'
+import { FACT_KEY_SEPARATOR } from './types.ts'
 import type { Entity, Fact, GraphTable, GraphView, RangeKind, Term, Violation } from './types.ts'
 
 /** Deployment limits the store enforces before writing. */
@@ -157,8 +158,7 @@ export class OntologyStore {
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     }
-    await this.#write(() => this.#terms.put(input.id, term))
-    return ACCEPTED
+    return this.#redefine(term)
   }
 
   /**
@@ -184,8 +184,22 @@ export class OntologyStore {
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     }
-    await this.#write(() => this.#terms.put(input.id, term))
-    return ACCEPTED
+    return this.#redefine(term)
+  }
+
+  /**
+   * Write a term, re-validating stored facts when it replaces an existing one.
+   * Under `strict` an invalidating redefinition is refused; otherwise it is
+   * applied and the invalidated facts are reported as violations so the
+   * caller can surface them.
+   * @param term - The complete new term.
+   * @returns the write outcome.
+   */
+  async #redefine(term: Term): Promise<WriteOutcome> {
+    const violations = validateRedefinition(this.graph, term)
+    if (violations.length > 0 && this.#limits.strict) return { ok: false, violations }
+    await this.#write(() => this.#terms.put(term.id, term))
+    return violations.length === 0 ? ACCEPTED : { ok: true, violations }
   }
 
   /**
@@ -272,6 +286,85 @@ export class OntologyStore {
       this.#indexFact(key, fact)
     })
     return { ok: true, violations }
+  }
+
+  /**
+   * Merge one entity into another: the survivor takes the union of classes,
+   * fills a missing label/comment from the absorbed entity, and every fact
+   * mentioning the absorbed id is rewritten to the survivor. A rewritten
+   * triple that already exists is dropped rather than duplicated. Under
+   * `strict`, a rewrite that would violate the TBox (typically a `functional`
+   * relation that now sees two objects) refuses the whole merge.
+   * @param from - Entity to absorb; removed on success.
+   * @param into - Surviving entity.
+   * @param now - Timestamp for the write, as ISO-8601.
+   * @returns the outcome and how many facts were rewritten.
+   */
+  async mergeEntities(from: string, into: string, now: string): Promise<WriteOutcome & { readonly facts: number }> {
+    const source = this.#entities.get(from)
+    const target = this.#entities.get(into)
+    const violations: Violation[] = []
+    if (from === into) violations.push({ code: 'merge-self', message: `cannot merge ${from} into itself` })
+    if (source === undefined) violations.push({ code: 'unknown-entity', message: `entity ${from} is not known` })
+    if (target === undefined) violations.push({ code: 'unknown-entity', message: `entity ${into} is not known` })
+    if (violations.length > 0 || source === undefined || target === undefined) return { ok: false, violations, facts: 0 }
+
+    const index = factIndex(this.graph, false)
+    const touched = new Map<string, Fact>()
+    for (const fact of index.bySubject.get(from) ?? []) touched.set(factKey(fact.subject, fact.predicate, fact.object), fact)
+    for (const fact of index.byObject.get(from) ?? []) {
+      if (fact.objectKind === 'entity') touched.set(factKey(fact.subject, fact.predicate, fact.object), fact)
+    }
+    const rewritten = new Map<string, Fact>()
+    for (const fact of touched.values()) {
+      const subject = fact.subject === from ? into : fact.subject
+      const object = fact.objectKind === 'entity' && fact.object === from ? into : fact.object
+      const key = factKey(subject, fact.predicate, object)
+      if (this.#facts.get(key) !== undefined || rewritten.has(key)) continue
+      rewritten.set(key, { ...fact, subject, object })
+    }
+    // Validate the rewrites against the graph as it will be once the old
+    // facts are gone: a functional clash only counts against facts that stay
+    // or against another rewrite.
+    const conflicts: Violation[] = []
+    for (const [key, fact] of rewritten) {
+      for (const violation of validateFactInput(this.graph, fact)) {
+        if (violation.code === 'functional-conflict') {
+          const stillHeld = (index.bySubject.get(fact.subject) ?? [])
+            .some(other => other.predicate === fact.predicate && other.object !== fact.object
+              && !touched.has(factKey(other.subject, other.predicate, other.object)))
+          const amongRewrites = [...rewritten.values()]
+            .some(other => other !== fact && other.subject === fact.subject && other.predicate === fact.predicate && other.object !== fact.object)
+          if (!stillHeld && !amongRewrites) continue
+        }
+        conflicts.push({ code: violation.code, message: `${key.replaceAll(FACT_KEY_SEPARATOR, ' ')}: ${violation.message}` })
+      }
+    }
+    if (conflicts.length > 0 && this.#limits.strict) return { ok: false, violations: conflicts, facts: 0 }
+
+    const label = target.label ?? source.label
+    const comment = target.comment ?? source.comment
+    const merged: Entity = {
+      id: into,
+      classes: [...new Set([...target.classes, ...source.classes])],
+      ...(label === undefined ? {} : { label }),
+      ...(comment === undefined ? {} : { comment }),
+      createdAt: target.createdAt,
+      updatedAt: now,
+    }
+    await this.#write(async () => {
+      for (const [key, fact] of touched) {
+        await this.#facts.delete(key)
+        this.#unindexFact(key, fact)
+      }
+      for (const [key, fact] of rewritten) {
+        await this.#facts.put(key, fact)
+        this.#indexFact(key, fact)
+      }
+      await this.#entities.put(into, merged)
+      await this.#entities.delete(from)
+    })
+    return { ok: true, violations: conflicts, facts: rewritten.size }
   }
 
   /**
