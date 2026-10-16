@@ -157,7 +157,10 @@ export function defineOntologyDefineTool(context: ToolContext): ToolDefinition {
       + '(a part_of b, b part_of c ⇒ a part_of c), "symmetric" (both directions), '
       + '"functional" (at most one object per subject — a second one is rejected as a conflict). '
       + '"inverseOf" pairs a relation with its reverse (owns / owned_by). Order does not matter: '
-      + 'entries are resolved by repeated passes. Re-defining an existing term replaces it wholesale; '
+      + 'entries are resolved by repeated passes. Extend the vocabulary to model the domain, not to '
+      + 'make one doubtful claim admissible: if a claim fits nothing because it is a category error '
+      + '(a module "depending on" a person, a date "owning" a service), report it rather than coining '
+      + 'a relation for it. Re-defining an existing term replaces it wholesale; '
       + 'if that would invalidate facts already asserted, the redefinition is rejected (strict) or '
       + 'applied with the invalidated facts listed as warnings (non-strict).',
     parameters: {
