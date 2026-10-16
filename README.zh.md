@@ -173,6 +173,8 @@ connected in 3 step(s):
 
 **重定义安全。** 重定义会整体替换词条，所以已存事实会按新词汇重新检查：收窄 domain/range、翻转 `rangeKind`、给一个主语已有两个宾语的关系加 `functional`、把事实依赖的类从 `subClassOf` 链里拿掉，这些在 `strict` 下都会被拒绝，并指出会破坏哪些事实。`strict: false` 下照样生效，但把破坏情况作为 warning 返回。
 
+**重复守卫。** 新实体的 id 若与已有实体只差大小写、分隔符或 `ns:` 前缀（`mod:api` 旁边有 `api`），或其 label 恰好是某个已有 id，会被接受但附带 `possible-duplicate` warning，并直接给出该跑的 merges 写法。store 无法判定它们是不是一回事，所以说出来而不是猜。
+
 **合并。** 两个 id 其实是同一个个体时，用 `ontology_assert` 的 `merges: [{ from, into }]`：`from` 的全部事实改写到 `into` 上，类取并集，保留 `into` 的 label 和 comment（缺的从 `from` 补），然后删掉 `from`。改写后与已有三元组重合的会合并掉；改写会违反词汇约束的（`functional` 关系出现两个宾语）在 `strict` 下拒绝整次合并。
 
 ## Code Mode
@@ -215,7 +217,7 @@ import { entail, findPath, validateFactInput } from 'dsh-ontology/ontology'
 
 ```sh
 pnpm install
-pnpm test        # 58 个单测：规则、工具、提示词段落
+pnpm test        # 60 个单测：规则、工具、提示词段落
 pnpm typecheck
 pnpm build
 pnpm smoke       # 在真实 dsh profile 里做启动冒烟（见下）

@@ -356,6 +356,46 @@ export function validateRelationInput(graph: GraphView, input: RelationInput): V
 }
 
 // ---------------------------------------------------------------------------
+// Near-duplicate entities
+// ---------------------------------------------------------------------------
+
+/**
+ * Reduce an identifier or label to the form two spellings of one thing share:
+ * lower-cased, a `ns:` namespace prefix stripped, and separators collapsed.
+ * @param text - Identifier or label.
+ * @returns the comparison key.
+ */
+function duplicateKey(text: string): string {
+  // Only `:` is treated as a namespace separator; a dot is ambiguous with a
+  // file extension (`tools.ts`), so dotted ids compare whole.
+  const stripped = text.slice(text.lastIndexOf(':') + 1)
+  return stripped.toLowerCase().replace(/[\s_-]+/g, '')
+}
+
+/**
+ * Find existing entities that a new entity id probably duplicates: same id up
+ * to case, separators, or a namespace prefix, or a label equal to the new id
+ * (or vice versa). The agent coins these constantly (`mod:tools.ts` beside
+ * `tools.ts`); the check cannot be certain, so callers surface it as a
+ * warning that names `merges` as the remedy rather than refusing the write.
+ * @param graph - The graph to read.
+ * @param id - The new entity id (not yet present).
+ * @param label - Its label, when given.
+ * @returns ids of likely duplicates, in iteration order.
+ */
+export function likelyDuplicates(graph: GraphView, id: string, label?: string): string[] {
+  const keys = new Set([duplicateKey(id), ...(label === undefined ? [] : [duplicateKey(label)])])
+  const found: string[] = []
+  for (const entity of graph.entities.values()) {
+    if (entity.id === id) continue
+    if (keys.has(duplicateKey(entity.id)) || (entity.label !== undefined && keys.has(duplicateKey(entity.label)))) {
+      found.push(entity.id)
+    }
+  }
+  return found
+}
+
+// ---------------------------------------------------------------------------
 // Redefinition
 // ---------------------------------------------------------------------------
 

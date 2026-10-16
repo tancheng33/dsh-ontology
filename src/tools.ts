@@ -157,7 +157,10 @@ export function defineOntologyDefineTool(context: ToolContext): ToolDefinition {
       + '(a part_of b, b part_of c ⇒ a part_of c), "symmetric" (both directions), '
       + '"functional" (at most one object per subject — a second one is rejected as a conflict). '
       + '"inverseOf" pairs a relation with its reverse (owns / owned_by). Order does not matter: '
-      + 'entries are resolved by repeated passes. Re-defining an existing term replaces it wholesale; '
+      + 'entries are resolved by repeated passes. Extend the vocabulary to model the domain, not to '
+      + 'make one doubtful claim admissible: if a claim fits nothing because it is a category error '
+      + '(a module "depending on" a person, a date "owning" a service), report it rather than coining '
+      + 'a relation for it. Re-defining an existing term replaces it wholesale; '
       + 'if that would invalidate facts already asserted, the redefinition is rejected (strict) or '
       + 'applied with the invalidated facts listed as warnings (non-strict).',
     parameters: {
@@ -305,7 +308,9 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
       + 'is checked against the declared vocabulary: the predicate must exist, the subject must be '
       + 'in its domain, and the object must be a known entity in its range (or a literal, for a '
       + 'literal-valued relation). A rejected fact tells you exactly which constraint failed — fix '
-      + 'the input or extend the vocabulary with ontology_define, do not work around it. '
+      + 'the input or extend the vocabulary with ontology_define, do not work around it. The same '
+      + 'applies before you call: if what you were told does not fit any relation, do not record a '
+      + 'different, better-fitting claim in its place; report the mismatch instead. '
       + 'Re-asserting the same triple is idempotent; an entity\'s classes accumulate across calls. '
       + 'Use "merges" when two ids turn out to name the same individual: every fact about "from" is '
       + 'rewritten onto "into", classes are unioned, and "from" disappears.',
@@ -374,7 +379,12 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
             description: 'Completed merges as "from -> into (n facts rewritten)"',
           },
           rejected: { ...rejectionSchema, required: true },
-          warnings: { type: 'array', required: true, items: { type: 'string' } },
+          warnings: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+            description: 'Accepted writes with a caveat: likely-duplicate entity ids, non-strict violations',
+          },
         },
       },
       render: (_args, value) => {
@@ -397,8 +407,13 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
 
       for (const entity of args.entities ?? []) {
         const outcome = await context.store.assertEntity(entity, now)
-        if (outcome.ok) assertedEntities.push(entity.id)
-        else rejected.push({ ref: entity.id, violations: messagesOf(outcome.violations) })
+        if (!outcome.ok) {
+          rejected.push({ ref: entity.id, violations: messagesOf(outcome.violations) })
+          continue
+        }
+        assertedEntities.push(entity.id)
+        // Accepted with a caveat (e.g. a likely duplicate id): say so.
+        if (outcome.violations.length > 0) warnings.push(`${entity.id}: ${messagesOf(outcome.violations).join('; ')}`)
       }
       for (const fact of args.facts ?? []) {
         const ref = `${fact.subject} ${fact.predicate} ${fact.object}`
