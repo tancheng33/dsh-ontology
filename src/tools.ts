@@ -305,7 +305,9 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
       + 'is checked against the declared vocabulary: the predicate must exist, the subject must be '
       + 'in its domain, and the object must be a known entity in its range (or a literal, for a '
       + 'literal-valued relation). A rejected fact tells you exactly which constraint failed — fix '
-      + 'the input or extend the vocabulary with ontology_define, do not work around it. '
+      + 'the input or extend the vocabulary with ontology_define, do not work around it. The same '
+      + 'applies before you call: if what you were told does not fit any relation, do not record a '
+      + 'different, better-fitting claim in its place; report the mismatch instead. '
       + 'Re-asserting the same triple is idempotent; an entity\'s classes accumulate across calls. '
       + 'Use "merges" when two ids turn out to name the same individual: every fact about "from" is '
       + 'rewritten onto "into", classes are unioned, and "from" disappears.',
