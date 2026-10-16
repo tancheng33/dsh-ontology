@@ -12,6 +12,7 @@ import {
   entail,
   entailment,
   entityClasses,
+  likelyDuplicates,
   factKey,
   findPath,
   neighbors,
@@ -374,6 +375,26 @@ describe('redefinition', () => {
     expect(outcome.ok).toBe(true)
     expect(outcome.violations[0]?.code).toBe('redefinition-invalidates')
     expect(lenient.graph.terms.get('owns')).toMatchObject({ domain: ['Component'] })
+  })
+})
+
+describe('near-duplicate entities', () => {
+  it('flags a new id that differs from an existing one only by namespace, case, or separators', async () => {
+    const store = await serviceGraph()
+    const prefixed = await store.assertEntity({ id: 'mod:api', classes: ['Service'] }, NOW)
+    expect(prefixed.ok).toBe(true)
+    expect(prefixed.violations[0]?.code).toBe('possible-duplicate')
+    expect(prefixed.violations[0]?.message).toContain('merges')
+    expect(store.graph.entities.has('mod:api')).toBe(true) // accepted, not refused
+
+    expect((await store.assertEntity({ id: 'Auth_Service', label: 'auth', classes: ['Service'] }, NOW)).violations[0]?.code).toBe('possible-duplicate')
+    expect(likelyDuplicates(store.graph, 'PG')).toEqual(['pg'])
+  })
+
+  it('stays quiet for distinct ids and for re-asserting an existing one', async () => {
+    const store = await serviceGraph()
+    expect((await store.assertEntity({ id: 'billing', classes: ['Service'] }, NOW)).violations).toEqual([])
+    expect((await store.assertEntity({ id: 'api', classes: ['Service'] }, NOW)).violations).toEqual([])
   })
 })
 

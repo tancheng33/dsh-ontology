@@ -7,7 +7,7 @@
  */
 
 import type { Domain, KvTable } from '@deepseek-ai/dsh-storage-domain'
-import { factIndex, factKey, validateEntityInput, validateFactInput, validateClassInput, validateRedefinition, validateRelationInput } from './ontology.ts'
+import { factIndex, factKey, likelyDuplicates, validateEntityInput, validateFactInput, validateClassInput, validateRedefinition, validateRelationInput } from './ontology.ts'
 import type { ClassInput, EntityInput, FactInput, RelationInput } from './ontology.ts'
 import type { OntologyDomainSpec } from './spec.ts'
 import { FACT_KEY_SEPARATOR } from './types.ts'
@@ -235,8 +235,19 @@ export class OntologyStore {
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     }
+    // A brand-new id that looks like an existing one is accepted but flagged:
+    // the store cannot know whether `mod:api` and `api` are one thing.
+    const duplicates = previous === undefined ? likelyDuplicates(this.graph, input.id, input.label) : []
     await this.#write(() => this.#entities.put(input.id, entity))
-    return ACCEPTED
+    if (duplicates.length === 0) return ACCEPTED
+    return {
+      ok: true,
+      violations: [{
+        code: 'possible-duplicate',
+        message: `${input.id} looks like existing ${duplicates.join(', ')}; if they are the same individual, `
+          + `merge with ontology_assert merges: [{ from: "${input.id}", into: "${duplicates[0]}" }]`,
+      }],
+    }
   }
 
   /**

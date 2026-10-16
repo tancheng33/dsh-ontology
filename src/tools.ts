@@ -379,7 +379,12 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
             description: 'Completed merges as "from -> into (n facts rewritten)"',
           },
           rejected: { ...rejectionSchema, required: true },
-          warnings: { type: 'array', required: true, items: { type: 'string' } },
+          warnings: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+            description: 'Accepted writes with a caveat: likely-duplicate entity ids, non-strict violations',
+          },
         },
       },
       render: (_args, value) => {
@@ -402,8 +407,13 @@ export function defineOntologyAssertTool(context: ToolContext): ToolDefinition {
 
       for (const entity of args.entities ?? []) {
         const outcome = await context.store.assertEntity(entity, now)
-        if (outcome.ok) assertedEntities.push(entity.id)
-        else rejected.push({ ref: entity.id, violations: messagesOf(outcome.violations) })
+        if (!outcome.ok) {
+          rejected.push({ ref: entity.id, violations: messagesOf(outcome.violations) })
+          continue
+        }
+        assertedEntities.push(entity.id)
+        // Accepted with a caveat (e.g. a likely duplicate id): say so.
+        if (outcome.violations.length > 0) warnings.push(`${entity.id}: ${messagesOf(outcome.violations).join('; ')}`)
       }
       for (const fact of args.facts ?? []) {
         const ref = `${fact.subject} ${fact.predicate} ${fact.object}`

@@ -173,6 +173,8 @@ connected in 3 step(s):
 
 **Redefinition safety.** Redefining a term replaces it wholesale, so the stored facts are re-checked against the would-be vocabulary: narrowing a domain or range, flipping `rangeKind`, adding `functional` over a subject that already has two objects, or cutting a class out of a `subClassOf` chain that facts rely on is refused under `strict`, naming the facts it would break. Under `strict: false` it is applied and the damage is returned as warnings.
 
+**Duplicate guard.** A new entity whose id differs from an existing one only by case, separators, or a `ns:` prefix (`mod:api` beside `api`), or whose label is an existing id, is accepted but comes back with a `possible-duplicate` warning that spells out the merge to run. The store cannot know whether they are one thing, so it says so instead of guessing.
+
 **Merging.** When two ids turn out to name one individual, `ontology_assert` with `merges: [{ from, into }]` rewrites every fact about `from` onto `into`, unions the classes, keeps `into`'s label and comment (filling gaps from `from`), and drops `from`. Rewrites that collide with existing triples collapse; a rewrite that would violate the vocabulary (a `functional` relation seeing two objects) refuses the merge under `strict`.
 
 ## Scale
@@ -215,7 +217,7 @@ import { entail, findPath, validateFactInput } from 'dsh-ontology/ontology'
 
 ```sh
 pnpm install
-pnpm test        # 58 unit tests: rules, tools, prompt section
+pnpm test        # 60 unit tests: rules, tools, prompt section
 pnpm typecheck
 pnpm build
 pnpm smoke       # boot smoke against a real dsh profile (see below)
