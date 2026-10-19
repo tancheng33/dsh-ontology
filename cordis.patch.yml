@@ -40,3 +40,7 @@
         # Capacity guards; an assertion past the bound fails loudly.
         maxEntities: 20000
         maxFacts: 100000
+        # Register the database ingestion tool (`ontology_ingest_db`), which
+        # reads a MySQL or PostgreSQL schema into the graph. The drivers are
+        # optional peers, loaded only when the tool is actually called.
+        enableIngest: true

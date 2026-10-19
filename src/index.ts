@@ -14,6 +14,7 @@ import { renderOntologySection } from './prompt.ts'
 import { ontologyDomainSpec } from './spec.ts'
 import { OntologyStore } from './store.ts'
 import { createOntologyTools } from './tools.ts'
+import { createIngestTools } from './ingest/index.ts'
 
 export * from './types.ts'
 export { OntologyStore } from './store.ts'
@@ -22,6 +23,8 @@ export { ontologyDomainSpec, ONTOLOGY_DOMAIN_VERSION, DOMAIN_NAME_PATTERN, asser
 export { renderOntologySection } from './prompt.ts'
 export { createOntologyTools } from './tools.ts'
 export type { ToolContext } from './tools.ts'
+export { createIngestTools } from './ingest/index.ts'
+export type { IngestDbInput, IngestDbOutput } from './ingest/types.ts'
 
 export const name = 'ontology'
 
@@ -53,6 +56,8 @@ export interface Config {
   /** Capacity guards; an assertion past the bound fails loudly. */
   maxEntities: number
   maxFacts: number
+  /** Whether to enable database ingestion tools (default: true). */
+  enableIngest?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -68,6 +73,7 @@ export const Config: Schema<Config> = Schema.object({
   maxLimit: Schema.number().default(500),
   maxEntities: Schema.number().default(20000),
   maxFacts: Schema.number().default(100000),
+  enableIngest: Schema.boolean().default(true),
 })
 
 /**
@@ -86,15 +92,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     maxFacts: config.maxFacts,
   })
 
-  for (const tool of createOntologyTools({
+  const toolContext = {
     store,
     inference: config.inference,
     inferenceLimit: config.maxInferred,
     defaultLimit: config.defaultLimit,
     maxLimit: config.maxLimit,
     now: () => new Date().toISOString(),
-  })) {
+  }
+
+  // Register core ontology tools
+  for (const tool of createOntologyTools(toolContext)) {
     ctx.tools.register(tool)
+  }
+
+  // Register database ingestion tools (if enabled)
+  if (config.enableIngest !== false) {
+    for (const tool of createIngestTools(toolContext)) {
+      ctx.tools.register(tool)
+    }
   }
 
   if (config.promptSection) {

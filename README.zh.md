@@ -157,6 +157,268 @@ connected in 3 step(s):
 | `path` | 这两个实体是怎么连起来的？ |
 | `dump` | 把已断言的全部内容（词条、实体、事实）作为数据返回，用于导出或备份。重新导入就是 `ontology_define` + `ontology_assert`。 |
 
+## 完整端到端示例：从数据库到查询
+
+本节展示完整工作流：定义词汇、从关系数据库导入数据、查询生成的知识图谱。
+
+### 第 1 步：准备数据库
+
+假设你有一个业务数据库，包含用户、团队、供应商和订单：
+
+```sql
+CREATE TABLE teams (
+  id          SERIAL PRIMARY KEY,
+  name        VARCHAR(100) NOT NULL,
+  region      VARCHAR(50)
+);
+
+CREATE TABLE users (
+  id          SERIAL PRIMARY KEY,
+  full_name   VARCHAR(100) NOT NULL,
+  email       VARCHAR(100),
+  team_id     INTEGER REFERENCES teams(id),
+  manager_id  INTEGER REFERENCES users(id)
+);
+
+CREATE TABLE suppliers (
+  id            SERIAL PRIMARY KEY,
+  company_name  VARCHAR(100) NOT NULL,
+  contact_email VARCHAR(100),
+  country       VARCHAR(10)
+);
+
+CREATE TABLE orders (
+  id          SERIAL PRIMARY KEY,
+  order_no    VARCHAR(50) NOT NULL,
+  amount      NUMERIC(12,2),
+  user_id     INTEGER NOT NULL REFERENCES users(id),
+  supplier_id INTEGER NOT NULL REFERENCES suppliers(id)
+);
+```
+
+### 第 2 步：定义词汇
+
+导入前，先告诉本体存在哪些类和关系：
+
+```jsonc
+// ontology_define
+{
+  "classes": [
+    { "id": "Team" },
+    { "id": "Person" },
+    { "id": "Supplier" },
+    { "id": "Order" }
+  ],
+  "relations": [
+    // 实体关系（来自外键）
+    { "id": "member_of", "domain": ["Person"], "range": ["Team"] },
+    { "id": "reports_to", "domain": ["Person"], "range": ["Person"], 
+      "characteristics": ["transitive"] },
+    { "id": "placed_by", "domain": ["Order"], "range": ["Person"], "inverseOf": "placed" },
+    { "id": "placed", "domain": ["Person"], "range": ["Order"] },
+    { "id": "supplied_by", "domain": ["Order"], "range": ["Supplier"], "inverseOf": "supplies" },
+    { "id": "supplies", "domain": ["Supplier"], "range": ["Order"] },
+    
+    // 字面量关系（来自普通列）
+    { "id": "region", "domain": ["Team"], "rangeKind": "literal" },
+    { "id": "has_email", "domain": ["Person"], "rangeKind": "literal" },
+    { "id": "contact_email", "domain": ["Supplier"], "rangeKind": "literal" },
+    { "id": "country_code", "domain": ["Supplier"], "rangeKind": "literal" },
+    { "id": "order_amount", "domain": ["Order"], "rangeKind": "literal" },
+    { "id": "order_status", "domain": ["Order"], "rangeKind": "literal" }
+  ]
+}
+```
+
+返回：`defined 4 class(es), 12 relation(s)`
+
+### 第 3 步：导入数据库
+
+现在将表映射到词汇并导入：
+
+```jsonc
+// ontology_ingest_db
+{
+  "connection": {
+    "type": "postgres",
+    "host": "localhost",
+    "database": "business",
+    "user": "readonly",
+    "password": "${DB_PASSWORD}"   // 从环境变量读取，绝不内联
+  },
+  "mapping": {
+    "tables": [
+      {
+        "table": "teams",
+        "entityClass": "Team",
+        "idColumn": "id",
+        "labelColumn": "name",
+        "attributes": [
+          { "column": "region", "relation": "region" }
+        ]
+      },
+      {
+        "table": "users",
+        "entityClass": "Person",
+        "idColumn": "id",
+        "labelColumn": "full_name",
+        "attributes": [
+          { "column": "email", "relation": "has_email", "transform": "lowercase" }
+        ],
+        "foreignKeys": [
+          { "column": "team_id", "targetTable": "teams", "relation": "member_of" },
+          { "column": "manager_id", "targetTable": "users", "relation": "reports_to", "nullable": true }
+        ]
+      },
+      {
+        "table": "suppliers",
+        "entityClass": "Supplier",
+        "idColumn": "id",
+        "labelColumn": "company_name",
+        "attributes": [
+          { "column": "contact_email", "relation": "contact_email" },
+          { "column": "country", "relation": "country_code", "transform": "uppercase" }
+        ]
+      },
+      {
+        "table": "orders",
+        "entityClass": "Order",
+        "idColumn": "id",
+        "labelColumn": "order_no",
+        "attributes": [
+          { "column": "amount", "relation": "order_amount" },
+          { "column": "status", "relation": "order_status" }
+        ],
+        "foreignKeys": [
+          { "column": "user_id", "targetTable": "users", "relation": "placed_by" },
+          { "column": "supplier_id", "targetTable": "suppliers", "relation": "supplied_by" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+返回：`ingested 14 entit(ies) and 32 fact(s) in 245ms (mode: full)`
+
+发生了什么：
+- **4 个用户** → 实体 `users_1`, `users_2`, `users_3`, `users_4`，类别 `Person`
+- **2 个团队** → 实体 `teams_1`, `teams_2`，类别 `Team`
+- **3 个供应商** → 实体 `suppliers_101`, `suppliers_102`, `suppliers_103`，类别 `Supplier`
+- **5 个订单** → 实体 `orders_1001` 到 `orders_1005`，类别 `Order`
+- **外键**变成关系：`orders_1001 placed_by users_1`，`orders_1001 supplied_by suppliers_101` 等
+- **属性**变成字面量事实：`users_1 has_email "zhangsan@example.com"`，`orders_1001 order_amount "5000.00"`
+
+### 第 4 步：查询知识图谱
+
+现在可以用自然语言概念提问：
+
+**按名字查找人：**
+```jsonc
+// ontology_query
+{ "mode": "entities", "classId": "Person", "search": "张三" }
+```
+返回：`users_1 (Person) "张三"`
+
+**这个人下了哪些订单？**
+```jsonc
+// ontology_query
+{ "mode": "facts", "subject": "users_1", "predicate": "placed", "includeInferred": true }
+```
+返回：
+```
+users_1 placed orders_1001 (inferred: inverse)
+users_1 placed orders_1002 (inferred: inverse)
+users_1 placed orders_1003 (inferred: inverse)
+```
+
+注意：数据库只存储了 `orders.user_id`（即 `placed_by` 方向）。反向的 `placed` 关系是**自动推导**出来的，因为我们声明了 `inverseOf`。
+
+**这些订单的供应商是谁？**
+```jsonc
+// ontology_query
+{ "mode": "facts", "subject": "orders_1001", "predicate": "supplied_by" }
+```
+返回：`orders_1001 supplied_by suppliers_101`
+
+**查找从人到供应商的路径：**
+```jsonc
+// ontology_query
+{ "mode": "path", "from": "users_1", "to": "suppliers_101", "depth": 4 }
+```
+返回：
+```
+connected in 2 step(s):
+  users_1 placed orders_1001 (inferred: inverse)
+  orders_1001 supplied_by suppliers_101
+```
+
+**查询汇报链（传递闭包）：**
+```jsonc
+// ontology_query
+{ "mode": "facts", "subject": "users_4", "predicate": "reports_to", "includeInferred": true }
+```
+返回：
+```
+users_4 reports_to users_2
+users_4 reports_to users_1 (inferred: transitive)
+```
+
+数据库只存了 `users_4.manager_id = 2` 和 `users_2.manager_id = 1`，但传递闭包给你完整的汇报链。
+
+### 第 5 步：提交前的 dry-run 模式
+
+导入生产数据前，先预览会创建什么：
+
+```jsonc
+// ontology_ingest_db
+{
+  "connection": { /* 同上 */ },
+  "mapping": { /* 同上 */ },
+  "options": { "mode": "dry-run", "limit": 2 }
+}
+```
+
+返回预览，包含示例实体和事实，但不写入任何数据。
+
+### YAML 配置替代方案
+
+也可以把映射保存为 YAML 文件：
+
+```yaml
+# ontology-ingest.yml
+connection:
+  type: postgres
+  host: localhost
+  database: business
+  user: readonly
+  password: ${DB_PASSWORD}
+
+mapping:
+  tables:
+    - table: users
+      entityClass: Person
+      idColumn: id
+      labelColumn: full_name
+      attributes:
+        - column: email
+          relation: has_email
+          transform: lowercase
+      foreignKeys:
+        - column: team_id
+          targetTable: teams
+          relation: member_of
+        - column: manager_id
+          targetTable: users
+          relation: reports_to
+          nullable: true
+    # ... 其他表
+```
+
+然后加载：`cat ontology-ingest.yml | yq -o json | ontology_ingest_db`
+
+## 数据库导入映射规则
+
 ## 它强制的规则
 
 **包含关系（Subsumption）。** `subClassOf` 是传递的：声明为 `Service` 的实体同时也是 `Component`，因此满足 `Component` 的 domain 约束，也会被 `Component` 查询命中。定义时拒绝成环——一旦成环，环上每个类的"是不是 X"都变得不可证伪。

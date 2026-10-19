@@ -1,0 +1,106 @@
+# Database Ingestion Configuration Example
+# Copy this file and customize for your database
+
+connection:
+  type: postgres  # or 'mysql'
+  host: localhost
+  port: 5432      # 5432 for PostgreSQL, 3306 for MySQL
+  database: myapp
+  user: postgres
+  password: ${DB_PASSWORD}  # Use environment variable for security
+  ssl: false
+  connectionTimeout: 10000
+
+mapping:
+  # Optional: prefix all entity IDs (e.g., "prod" → "prod_users_1")
+  globalPrefix: dev
+
+  tables:
+    # Example: Users table
+    - table: users
+      entityClass: Person
+      idColumn: id
+      labelColumn: full_name
+      commentColumn: bio
+
+      # Map regular columns to literal relations
+      attributes:
+        - column: email
+          relation: has_email
+        - column: phone
+          relation: has_phone
+          transform: trim
+        - column: status
+          relation: account_status
+
+      # Map foreign keys to entity relations
+      foreignKeys:
+        - column: team_id
+          targetTable: teams
+          relation: member_of
+          nullable: true
+
+        - column: manager_id
+          targetTable: users  # Self-reference
+          relation: reports_to
+          nullable: true
+
+    # Example: Teams table
+    - table: teams
+      entityClass: Team
+      idColumn: id
+      labelColumn: name
+      where: "deleted_at IS NULL"  # Only import active teams
+
+      foreignKeys:
+        - column: parent_team_id
+          targetTable: teams
+          relation: parent_of
+          nullable: true
+
+    # Example: Orders table
+    - table: orders
+      entityClass: Order
+      idColumn: id
+      labelColumn: order_number
+
+      attributes:
+        - column: amount
+          relation: order_amount
+        - column: status
+          relation: order_status
+        - column: created_at
+          relation: created_at
+
+      foreignKeys:
+        - column: user_id
+          targetTable: users
+          relation: placed_by
+          nullable: false
+
+        - column: supplier_id
+          targetTable: suppliers
+          relation: supplied_by
+          nullable: false
+
+    # Example: Suppliers table
+    - table: suppliers
+      entityClass: Supplier
+      idColumn: id
+      labelColumn: company_name
+
+      attributes:
+        - column: contact_email
+          relation: contact_email
+        - column: country
+          relation: country_code
+
+options:
+  mode: full              # 'full', 'incremental', or 'dry-run'
+  batchSize: 500          # Rows per batch
+  limit: null             # Set a number to limit rows (for testing)
+  continueOnError: false  # Continue processing other tables on error
+
+  # For incremental sync:
+  # timestampColumn: updated_at
+  # lastSyncTime: '2026-10-15T00:00:00Z'
